@@ -341,16 +341,20 @@ struct Marquee: View {
                         let cycle = delay + Double((textWidth + gap) / speed)
                         let phase = ctx.date.timeIntervalSince(start).truncatingRemainder(dividingBy: cycle)
                         let offset = phase < delay ? 0 : -CGFloat(phase - delay) * speed
+                        // Fondu gauche seulement quand le texte défile : à l'arrêt, la première lettre reste entière.
+                        let leftFade = 0.04 * min(-offset / 12, 1)
                         HStack(spacing: gap) { label; label }
                             .offset(x: offset)
+                            .frame(width: g.size.width, alignment: .leading)
+                            .mask(
+                                LinearGradient(stops: [
+                                    .init(color: leftFade > 0.001 ? .clear : .black, location: 0),
+                                    .init(color: .black, location: max(leftFade, 0.001)),
+                                    .init(color: .black, location: 0.9), .init(color: .clear, location: 1),
+                                ], startPoint: .leading, endPoint: .trailing)
+                            )
                     }
                     .frame(width: g.size.width, alignment: .leading)
-                    .mask(
-                        LinearGradient(stops: [
-                            .init(color: .clear, location: 0), .init(color: .black, location: 0.04),
-                            .init(color: .black, location: 0.9), .init(color: .clear, location: 1),
-                        ], startPoint: .leading, endPoint: .trailing)
-                    )
                 } else {
                     label.frame(width: g.size.width, alignment: .leading)
                 }

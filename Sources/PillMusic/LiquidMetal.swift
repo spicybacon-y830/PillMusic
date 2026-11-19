@@ -17,7 +17,10 @@ struct LiquidMetal: View {
 
     var body: some View {
         Group {
-            if let frame = renderer.frame {
+            if ShaderRenderer.drawsInLayer {
+                // Chemin normal : le shader est posé directement dans un calque, sans repasser par SwiftUI.
+                ShaderLayer(renderer: renderer)
+            } else if let frame = renderer.frame {
                 Image(decorative: frame, scale: renderer.pixelScale)
                     .resizable()
                     .interpolation(.high)
@@ -55,8 +58,72 @@ struct LiquidUniforms {
     var designRes: Float
 }
 
+/// Vue AppKit minimale : un calque dont le contenu est remplacé à chaque image du shader.
+/// SwiftUI la place, la met à l'échelle et l'anime comme n'importe quelle vue, mais une
+/// nouvelle image ne déclenche ni mise à jour SwiftUI ni recalcul de mise en page.
+final class ShaderLayerView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        layer?.contentsGravity = .resize
+        layer?.masksToBounds = true
+        layer?.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "cornerRadius": NSNull()]
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = min(bounds.width, bounds.height) / 2
+    }
+
+    // Les clics traversent jusqu'au bouton SwiftUI.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct ShaderLayer: NSViewRepresentable {
+    let renderer: ShaderRenderer
+
+    func makeNSView(context: Context) -> ShaderLayerView {
+        let view = ShaderLayerView()
+        renderer.attach(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: ShaderLayerView, context: Context) {}
+}
+
 final class ShaderRenderer: ObservableObject {
     static let shared = ShaderRenderer()
+    /// Faux uniquement pour les rendus de test (ImageRenderer ne sait pas dessiner les vues AppKit).
+    static var drawsInLayer = true
+
+    private let displays = NSHashTable<ShaderLayerView>.weakObjects()
+    private var latest: CGImage?
+
+    func attach(_ view: ShaderLayerView) {
+        displays.add(view)
+        show(latest)
+        needsFrame = true
+        wake()
+    }
+
+    private func show(_ image: CGImage?) {
+        guard let image else { return }
+        latest = image
+        if Self.drawsInLayer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for view in displays.allObjects {
+                view.layer?.contentsScale = pixelScale
+                view.layer?.contents = image
+            }
+            CATransaction.commit()
+        } else {
+            frame = image
+        }
+    }
 
     @Published private(set) var frame: CGImage?
     private(set) var pixelScale: CGFloat = 2
@@ -183,7 +250,7 @@ final class ShaderRenderer: ObservableObject {
         if target?.width != px { needsFrame = true }
 
         // En pause : image figée, et la boucle s'endort complètement (0 réveil par seconde).
-        guard moving || !settled || needsFrame || frame == nil else {
+        guard moving || !settled || needsFrame || latest == nil else {
             if !inFlight { stopTimer() }
             return
         }
@@ -238,7 +305,7 @@ final class ShaderRenderer: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.inFlight = false
-                if let image { self.frame = image }
+                self.show(image)
             }
         }
         cb.commit()

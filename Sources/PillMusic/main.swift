@@ -14,6 +14,7 @@ if args.count >= 3, args[1] == "--render-pill" {
         if let urls = Bundle.main.urls(forResourcesWithExtension: "ttf", subdirectory: nil) {
             for url in urls { CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil) }
         }
+        ShaderRenderer.drawsInLayer = false
         let music = MusicController()
         music.loadDemo(artwork: args.count > 3 ? NSImage(contentsOfFile: args[3]) : nil)
         let settings = Settings()
