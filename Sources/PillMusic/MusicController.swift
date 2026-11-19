@@ -22,7 +22,7 @@ final class MusicController: ObservableObject {
     @Published private(set) var state: PlayerState = .notRunning
     @Published private(set) var track: Track?
     @Published private(set) var artwork: NSImage?
-    @Published private(set) var tints: [NSColor] = [MusicController.defaultTint]
+    @Published private(set) var palette: Palette.Colors = .fallback
     @Published private(set) var discColor: NSColor = MusicController.defaultDisc
 
     private var positionBase: Double = 0
@@ -73,6 +73,14 @@ final class MusicController: ObservableObject {
         guard let track else { return 0 }
         let p = state == .playing ? positionBase + date.timeIntervalSince(positionDate) : positionBase
         return min(max(p, 0), max(track.duration, 0))
+    }
+
+    /// Rendu de test uniquement : morceau fictif.
+    func loadDemo(artwork: NSImage?) {
+        track = Track(id: "demo", title: "Ain't in LA", artist: "ADÉLA", album: "", duration: 173)
+        state = .paused
+        positionBase = 128
+        self.artwork = artwork
     }
 
     // MARK: - Actions
@@ -264,6 +272,7 @@ final class MusicController: ObservableObject {
 
     private func finishArtwork(_ image: NSImage?, for track: Track) {
         let colors = image.flatMap { Palette.extract(from: $0) } ?? .fallback
+        Self.writeDiagnostic(image: image, colors: colors, track: track)
         DispatchQueue.main.async {
             self.artworkCache[track.id] = (image, colors)
             if self.artworkCache.count > 40 { self.artworkCache.removeAll() }
@@ -272,10 +281,27 @@ final class MusicController: ObservableObject {
         }
     }
 
+    /// Diagnostic local : dernière pochette et couleurs extraites (~/Library/Caches/PillMusic).
+    private static func writeDiagnostic(image: NSImage?, colors: Palette.Colors, track: Track) {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        let dir = caches.appendingPathComponent("PillMusic", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let tiff = image?.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: dir.appendingPathComponent("last-artwork.png"))
+        }
+        func hex(_ c: NSColor) -> String {
+            let s = c.usingColorSpace(.sRGB) ?? c
+            return String(format: "#%02X%02X%02X", Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255))
+        }
+        let text = "\(track.title) — \(track.artist)\ntints: \(colors.tints.map(hex).joined(separator: " "))\ndisc: \(hex(colors.disc))\n"
+        try? text.write(to: dir.appendingPathComponent("last-palette.txt"), atomically: true, encoding: .utf8)
+    }
+
     private func setArtwork(_ image: NSImage?, colors: Palette.Colors, for id: String?) {
         if id == nil { artworkTrackID = nil }
         artwork = image
-        tints = colors.tints
+        palette = colors
         discColor = colors.disc
     }
 

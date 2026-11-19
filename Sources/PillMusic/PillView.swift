@@ -10,6 +10,12 @@ enum Design {
     static let disc: CGFloat = 160
     static let gap: CGFloat = 16
     static var height: CGFloat { disc + paddingV * 2 }
+    /// Boutons précédent / suivant révélés au survol.
+    static let skip: CGFloat = 84
+    static var skipExtra: CGFloat { (skip + gap) * 2 }
+    /// Ressort de l'ouverture au survol (appliqué à toute la pilule d'un coup, fond compris).
+    static let island = Animation.spring(response: 0.5, dampingFraction: 0.5)
+    static var infoWidth: CGFloat { width - paddingH * 2 - disc * 2 - gap * 2 }
 
     static func colors(_ scheme: ColorScheme) -> (bg: Color, title: Color, secondary: Color, track: Color, fill: Color) {
         scheme == .dark
@@ -31,7 +37,7 @@ extension Color {
     }
 }
 
-enum HitZone: Hashable { case pill, artwork, play, bar }
+enum HitZone: Hashable { case pill, artwork, play, bar, prev, next }
 
 struct FramesKey: PreferenceKey {
     static var defaultValue: [HitZone: CGRect] = [:]
@@ -56,25 +62,45 @@ struct PillRoot: View {
     @ObservedObject var ui: UIState
     @Environment(\.colorScheme) private var scheme
 
-    private var S: CGFloat { settings.size.scale }
+    private var S: CGFloat { settings.scale }
 
     var body: some View {
         let c = Design.colors(scheme)
-        let hovering = ui.isHovering(.pill)
+        // Au survol, la pilule s'étire vers la droite (même hauteur, pochette immobile)
+        // et révèle précédent / suivant, à la façon de la Dynamic Island.
+        let expanded = ui.forceExpanded ?? ui.expanded
+        let skip = Design.skip * S
 
-        HStack(spacing: Design.gap * S) {
+        HStack(spacing: 0) {
             ArtworkDisc(image: music.artwork, trackID: music.track?.id, direction: ui.skipDirection,
-                        size: Design.disc * S, hovering: ui.isHovering(.artwork))
+                        size: Design.disc * S, hovering: ui.isHovering(.artwork), linkStatus: ui.linkStatus)
                 .hitZone(.artwork)
+                .padding(.trailing, Design.gap * S)
 
             InfoColumn(music: music, ui: ui, S: S, colors: c)
-                .offset(x: ui.nudge * 0.6)
+                .frame(width: Design.infoWidth * S)
+
+            // Chaque bouton grandit au même rythme que la place qui s'ouvre : ni débordement, ni découpe.
+            SkipButton(forward: false, size: skip, colors: c, hovering: ui.isHovering(.prev), visible: expanded) {
+                ui.skipDirection = -1; music.previous()
+            }
+            .hitZone(.prev)
+            .frame(width: expanded ? skip : 0)
+            .padding(.leading, expanded ? Design.gap * S : 0)
+
+            SkipButton(forward: true, size: skip, colors: c, hovering: ui.isHovering(.next), visible: expanded) {
+                ui.skipDirection = 1; music.next()
+            }
+            .hitZone(.next)
+            .frame(width: expanded ? skip : 0)
+            .padding(.leading, expanded ? Design.gap * S : 0)
 
             PlayButton(music: music, ui: ui, size: Design.disc * S)
+                .padding(.leading, Design.gap * S)
         }
         .padding(.horizontal, Design.paddingH * S)
         .padding(.vertical, Design.paddingV * S)
-        .frame(width: Design.width * S, height: Design.height * S)
+        .frame(height: Design.height * S)
         .background(
             Capsule().fill(c.bg)
                 .overlay(Capsule().strokeBorder(scheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.05), lineWidth: 0.5))
@@ -83,12 +109,10 @@ struct PillRoot: View {
         .hitZone(.pill)
         // Effets « bubbly » : survol, lévitation pendant le déplacement, squash & stretch.
         .scaleEffect(x: ui.squash.width, y: ui.squash.height)
-        .scaleEffect(ui.isDragging ? 1.045 : (hovering ? 1.018 : 1))
-        .offset(x: ui.nudge)
+        .scaleEffect(ui.isDragging ? 1.045 : 1)
         .shadow(color: .black.opacity(scheme == .dark ? 0.45 : (ui.isDragging ? 0.22 : 0.13)),
                 radius: (ui.isDragging ? 26 : 14) * S * 2, y: (ui.isDragging ? 14 : 6) * S * 2)
-        .animation(.spring(response: 0.35, dampingFraction: 0.55), value: hovering)
-        .animation(.spring(response: 0.3, dampingFraction: 0.5), value: ui.isDragging)
+                .animation(.spring(response: 0.3, dampingFraction: 0.5), value: ui.isDragging)
         // Apparition / disparition avec Musique
         .scaleEffect(ui.shown ? 1 : 0.55)
         .blur(radius: ui.shown ? 0 : 6)
@@ -113,6 +137,7 @@ struct ArtworkDisc: View {
     let direction: CGFloat
     let size: CGFloat
     let hovering: Bool
+    var linkStatus: LinkStatus? = nil
 
     var body: some View {
         ZStack {
@@ -140,6 +165,20 @@ struct ArtworkDisc: View {
                     .combined(with: .offset(x: direction * size * 0.2)),
                 removal: .opacity.animation(.easeOut(duration: 0.2).delay(0.3))
             ))
+
+            // Retour du double-tap : lien en recherche, copié, ou introuvable.
+            if let linkStatus {
+                ZStack {
+                    Circle().fill(.black.opacity(0.45))
+                    Image(systemName: linkStatus.symbol)
+                        .font(.system(size: size * 0.34, weight: .bold))
+                        .foregroundStyle(.white)
+                        .id(linkStatus)
+                        .transition(.scale(scale: 0.5).combined(with: .opacity))
+                }
+                .frame(width: size, height: size)
+                .transition(.opacity)
+            }
         }
         .frame(width: size, height: size)
         .animation(.spring(response: 0.55, dampingFraction: 0.6), value: image.map { ObjectIdentifier($0) })
@@ -178,6 +217,9 @@ struct InfoColumn: View {
                 removal: .modifier(active: SlideBlur(x: -ui.skipDirection * 40 * S, blur: 6, opacity: 0),
                                    identity: SlideBlur(x: 0, blur: 0, opacity: 1))
             ))
+            // Swipe : seuls le titre et l'artiste glissent (gauche = suivant, droite = précédent).
+            .offset(x: ui.nudge)
+            .opacity(1 - Double(min(abs(ui.nudge) / 60, 0.5)))
 
             ProgressRow(music: music, ui: ui, S: S, colors: colors)
         }
@@ -339,9 +381,11 @@ struct PlayButton: View {
         ZStack {
             Circle().fill(Color(nsColor: music.discColor))
                 .animation(.easeInOut(duration: 0.6), value: music.discColor)
-            LiquidMetal(tints: music.tints,
+            LiquidMetal(renderer: .shared,
+                        palette: music.palette,
                         speed: playing ? (hovering ? 1.6 : 1) : 0,
-                        boostToken: boostToken)
+                        boostToken: boostToken,
+                        size: size)
                 .clipShape(Circle())
 
             Group {
@@ -400,5 +444,48 @@ struct PauseGlyph: Shape {
         p.addRoundedRect(in: CGRect(x: 16.25 * k, y: 9.75 * k, width: 16.25 * k, height: 58.5 * k), cornerSize: CGSize(width: k, height: k))
         p.addRoundedRect(in: CGRect(x: 45.5 * k, y: 9.75 * k, width: 16.25 * k, height: 58.5 * k), cornerSize: CGSize(width: k, height: k))
         return p
+    }
+}
+
+// MARK: - Boutons précédent / suivant
+
+struct SkipButton: View {
+    let forward: Bool
+    let size: CGFloat
+    let colors: (bg: Color, title: Color, secondary: Color, track: Color, fill: Color)
+    let hovering: Bool
+    let visible: Bool
+    let action: () -> Void
+
+    private let _pressedBox = State<Bool>(initialValue: false)
+    private var pressed: Bool { get { _pressedBox.wrappedValue } nonmutating set { _pressedBox.wrappedValue = newValue } }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(colors.track)
+            Circle().fill(colors.title.opacity(hovering ? 0.12 : 0))
+            Image(systemName: forward ? "forward.fill" : "backward.fill")
+                .font(.system(size: size * 0.36, weight: .bold))
+                .foregroundStyle(colors.title)
+        }
+        .frame(width: size, height: size)
+        .scaleEffect(pressed ? 0.9 : 1)
+        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: pressed)
+        .animation(.easeOut(duration: 0.15), value: hovering)
+        // Grandit exactement avec la place qui s'ouvre : même ressort que la pilule, sans délai
+        // (l'animation vient du conteneur, une seule transaction pour tout).
+        .scaleEffect(visible ? 1 : 0.01)
+        .opacity(visible ? 1 : 0)
+        .allowsHitTesting(visible)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in if !pressed { pressed = true } }
+                .onEnded { v in
+                    pressed = false
+                    guard hypot(v.location.x - size / 2, v.location.y - size / 2) <= size / 2 + 4 else { return }
+                    action()
+                }
+        )
     }
 }

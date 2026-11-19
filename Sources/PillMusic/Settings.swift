@@ -42,6 +42,9 @@ final class Settings: ObservableObject {
         didSet { defaults.set(size.rawValue, forKey: "size") }
     }
 
+    /// Échelle de la pilule.
+    var scale: CGFloat { size.scale }
+
     @Published var appearance: PillAppearance {
         didSet {
             defaults.set(appearance.rawValue, forKey: "appearance")

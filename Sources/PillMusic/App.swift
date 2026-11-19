@@ -6,16 +6,27 @@ import SwiftUI
 // MARK: - État d'interaction (survol, glisser, swipe)
 
 final class UIState: ObservableObject {
-    @Published var pointer: CGPoint?
-    @Published var frames: [HitZone: CGRect] = [:]
+    @Published var pointer: CGPoint? { didSet { updateExpanded() } }
+    /// Cadres des éléments (non publiés : évite de tout redessiner à chaque image d'animation).
+    var frames: [HitZone: CGRect] = [:]
+    /// Pilule ouverte (survol). Zone fixe avec hystérésis : pas de bascule pendant l'animation.
+    @Published private(set) var expanded = false
+    var pillScale: CGFloat = 0.25
+    var canExpand = false { didSet { updateExpanded() } }
     @Published var isDragging = false
     @Published var squash = CGSize(width: 1, height: 1)
     @Published var nudge: CGFloat = 0
     @Published var skipDirection: CGFloat = 1
     @Published var shown = false
+    /// Rendu de test uniquement : force l'état ouvert/fermé.
+    var forceExpanded: Bool?
 
     weak var window: NSWindow?
     var onArtworkClick: (() -> Void)?
+    var onArtworkDoubleClick: (() -> Void)?
+    /// Retour visuel sur la pochette après un double-tap (copie du lien).
+    @Published var linkStatus: LinkStatus?
+    private var pendingArtworkClick: DispatchWorkItem?
     var onSkip: ((Int) -> Void)?
     var onMoved: (() -> Void)?
 
@@ -26,9 +37,30 @@ final class UIState: ObservableObject {
     private var scrollAccum: CGFloat = 0
     private var scrollFired = false
 
+    /// Rectangle de la pilule dans la fenêtre (centrée : s'écarte des deux côtés, hauteur fixe).
+    func pillRect(expanded: Bool) -> CGRect {
+        let m = PillPanel.margin
+        let windowWidth = (Design.width + Design.skipExtra) * pillScale + m * 2
+        let windowHeight = Design.height * pillScale + m * 2
+        let w = (Design.width + (expanded ? Design.skipExtra : 0)) * pillScale
+        let h = Design.height * pillScale
+        return CGRect(x: (windowWidth - w) / 2, y: (windowHeight - h) / 2, width: w, height: h)
+    }
+
+    func updateExpanded() {
+        guard !isDragging else { return }
+        var open = false
+        if let p = pointer, canExpand {
+            open = pillRect(expanded: expanded).insetBy(dx: -3, dy: -3).contains(p)
+        }
+        // Une seule transaction animée : fond, boutons et bouton play bougent ensemble.
+        if open != expanded { withAnimation(Design.island) { expanded = open } }
+    }
+
     func isHovering(_ zone: HitZone) -> Bool {
+        if zone == .pill, let p = pointer { return pillRect(expanded: expanded).contains(p) }
         guard let p = pointer, let f = frames[zone] else { return false }
-        if zone == .play || zone == .artwork {
+        if zone == .play || zone == .artwork || zone == .prev || zone == .next {
             return hypot(p.x - f.midX, p.y - f.midY) <= f.width / 2
         }
         return f.contains(p)
@@ -68,11 +100,20 @@ final class UIState: ObservableObject {
         if !isDragging {
             if let f = frames[.artwork],
                hypot(value.location.x - f.midX, value.location.y - f.midY) <= f.width / 2 {
-                onArtworkClick?()
+                // Double-tap : copie du lien. Simple clic : ouvre Musique (après le délai de double-clic).
+                pendingArtworkClick?.cancel()
+                if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+                    onArtworkDoubleClick?()
+                } else {
+                    let work = DispatchWorkItem { [weak self] in self?.onArtworkClick?() }
+                    pendingArtworkClick = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+                }
             }
             return
         }
         isDragging = false
+        updateExpanded()
         withAnimation(.spring(response: 0.45, dampingFraction: 0.35)) { squash = CGSize(width: 1, height: 1) }
         keepOnScreen()
         onMoved?()
@@ -111,18 +152,19 @@ final class UIState: ObservableObject {
             // Direction réelle des doigts, quel que soit le réglage « défilement naturel ».
             let finger = e.isDirectionInvertedFromDevice ? e.scrollingDeltaX : -e.scrollingDeltaX
             scrollAccum += finger
-            let rubber = (scrollAccum >= 0 ? 1 : -1) * min(abs(scrollAccum) * 0.3, 22)
-            withAnimation(.interactiveSpring(response: 0.15, dampingFraction: 0.8)) { nudge = rubber }
+            // Le titre et l'artiste suivent les doigts, avec une résistance élastique.
+            let rubber = (scrollAccum >= 0 ? 1 : -1) * min(abs(scrollAccum) * 0.35, 30)
+            withAnimation(.interactiveSpring(response: 0.15, dampingFraction: 0.85)) { nudge = rubber }
             if !scrollFired, abs(scrollAccum) > 70 {
                 scrollFired = true
                 let next = scrollAccum < 0
                 skipDirection = next ? 1 : -1
                 onSkip?(next ? 1 : -1)
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.4)) { nudge = 0 }
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { nudge = 0 }
             }
         }
         if e.phase.contains(.ended) || e.phase.contains(.cancelled) {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.4)) { nudge = 0 }
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { nudge = 0 }
         }
     }
 }
@@ -209,7 +251,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = host
 
         ui.window = panel
+        ShaderRenderer.shared.window = panel
+        ui.pillScale = settings.scale
+        music.$track.map { $0 != nil }.removeDuplicates().sink { [weak self] has in self?.ui.canExpand = has }
+            .store(in: &cancellables)
         ui.onArtworkClick = { [weak self] in self?.music.openMusic() }
+        ui.onArtworkDoubleClick = { [weak self] in self?.copyTrackLink() }
         ui.onSkip = { [weak self] dir in dir > 0 ? self?.music.next() : self?.music.previous() }
         ui.onMoved = { [weak self] in self?.saveCenter() }
         music.$track.removeDuplicates { $0?.id == $1?.id }.dropFirst().sink { [weak self] _ in
@@ -221,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.$size.dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.ui.pillScale = self.settings.scale
                 self.layoutWindow(keepCenter: CGPoint(x: self.panel.frame.midX, y: self.panel.frame.midY))
                 self.saveCenter()
             }
@@ -266,10 +314,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func layoutWindow(keepCenter center: CGPoint) {
         let s = settings.size.scale
-        let w = Design.width * s + PillPanel.margin * 2
+        let w = (Design.width + Design.skipExtra) * s + PillPanel.margin * 2
         let h = Design.height * s + PillPanel.margin * 2
         panel.setFrame(NSRect(x: center.x - w / 2, y: center.y - h / 2, width: w, height: h), display: true)
         ui.keepOnScreen()
+    }
+
+    // MARK: Copie du lien du morceau
+
+    private var linkHide: DispatchWorkItem?
+
+    private func copyTrackLink() {
+        guard let track = music.track else { return }
+        linkHide?.cancel()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { ui.linkStatus = .loading }
+        TrackLink.find(track: track) { [weak self] url in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let url {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                }
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { self.ui.linkStatus = url != nil ? .copied : .failed }
+                let hide = DispatchWorkItem { [weak self] in
+                    withAnimation(.easeOut(duration: 0.25)) { self?.ui.linkStatus = nil }
+                }
+                self.linkHide = hide
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: hide)
+            }
+        }
     }
 
     private func restoredCenter() -> CGPoint {

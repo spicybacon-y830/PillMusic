@@ -1,116 +1,137 @@
 import AppKit
-import MetalKit
+import Combine
+import ImageIO
+import Metal
+import simd
 import SwiftUI
 
-/// Portage Metal fidèle du shader « LiquidMetal » de Paper (@paper-design/shaders 0.0.82),
-/// avec les réglages exacts du design. Compilé au lancement : pas besoin de Xcode.
-struct LiquidMetal: NSViewRepresentable {
-    var tints: [NSColor]
+/// Portage Metal fidèle du shader « LiquidMetal » de Paper (@paper-design/shaders 0.0.82).
+/// Le shader est rendu hors écran puis affiché comme une image SwiftUI : il suit ainsi
+/// parfaitement toutes les animations (déplacement, échelle) du bouton, sans décalage.
+struct LiquidMetal: View {
+    @ObservedObject var renderer: ShaderRenderer
+    var palette: Palette.Colors
     var speed: Float
     var boostToken: Int
+    var size: CGFloat
 
-    func makeNSView(context: Context) -> LiquidMetalView {
-        LiquidMetalView()
-    }
-
-    func updateNSView(_ view: LiquidMetalView, context: Context) {
-        view.setTints(tints)
-        view.targetSpeed = speed
-        if boostToken != view.lastBoostToken {
-            view.lastBoostToken = boostToken
-            view.boost()
+    var body: some View {
+        Group {
+            if let frame = renderer.frame {
+                Image(decorative: frame, scale: renderer.pixelScale)
+                    .resizable()
+                    .interpolation(.high)
+            } else {
+                Color.clear
+            }
         }
+        .frame(width: size, height: size)
+        .onAppear {
+            renderer.setPalette(palette)
+            renderer.targetSpeed = speed
+            renderer.pointSize = size
+        }
+        .onChange(of: palette) { renderer.setPalette(palette) }
+        .onChange(of: speed) { renderer.targetSpeed = speed }
+        .onChange(of: size) { renderer.pointSize = size }
+        .onChange(of: boostToken) { renderer.boost() }
     }
 }
 
-final class LiquidMetalView: MTKView, MTKViewDelegate {
-    private struct Uniforms {
-        var tint: SIMD4<Float>
-        var tint2: SIMD4<Float>
-        var tint3: SIMD4<Float>
-        var back: SIMD4<Float>
-        var viewSize: SIMD2<Float>
-        var time: Float
-        var softness: Float
-        var repetition: Float
-        var shiftRed: Float
-        var shiftBlue: Float
-        var distortion: Float
-        var contour: Float
-        var angle: Float
-        var designRes: Float
-    }
+struct LiquidUniforms {
+    var tint: SIMD4<Float>
+    var tint2: SIMD4<Float>
+    var tint3: SIMD4<Float>
+    var back: SIMD4<Float>
+    var viewSize: SIMD2<Float>
+    var time: Float
+    var softness: Float
+    var repetition: Float
+    var shiftRed: Float
+    var shiftBlue: Float
+    var distortion: Float
+    var contour: Float
+    var angle: Float
+    var designRes: Float
+}
 
+final class ShaderRenderer: ObservableObject {
+    static let shared = ShaderRenderer()
+
+    @Published private(set) var frame: CGImage?
+    private(set) var pixelScale: CGFloat = 2
+    var pointSize: CGFloat = 40
+    var targetSpeed: Float = 1
+    weak var window: NSWindow?
+
+    private var device: MTLDevice?
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState?
     private var shapeTexture: MTLTexture?
     private var sampler: MTLSamplerState?
+    private var target: MTLTexture?
 
     private static let paperRed = SIMD4<Float>(0xCA / 255, 0x05 / 255, 0x03 / 255, 1)
     private var currentTints = [paperRed, paperRed, paperRed]
     private var targetTints = [paperRed, paperRed, paperRed]
-    var targetSpeed: Float = 1
-    var lastBoostToken = 0
     private var speed: Float = 1
     private var boostAmount: Float = 0
     // Démarre à une phase arbitraire, comme le `frame` du design.
     private var time: Float = Float.random(in: 0...200)
-    private var lastTimestamp: CFTimeInterval = CACurrentMediaTime()
+    private var lastTimestamp = CACurrentMediaTime()
+    private var timer: Timer?
+    private var inFlight = false
+    private var needsFrame = true
 
-    init() {
-        let device = MTLCreateSystemDefaultDevice()
-        super.init(frame: .zero, device: device)
-        wantsLayer = true
-        delegate = self
-        colorPixelFormat = .bgra8Unorm
-        clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        layer?.isOpaque = false
-        (layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
-        preferredFramesPerSecond = 60
-        framebufferOnly = true
-        if let device { setup(device) }
+    private init() {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        self.device = device
+        queue = device.makeCommandQueue()
+        pipeline = Self.makePipeline(device: device)
+        shapeTexture = ShapeTexture.make(device: device)
+        sampler = Self.makeSampler(device: device)
+
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
-    required init(coder: NSCoder) { fatalError() }
+    static func makePipeline(device: MTLDevice) -> MTLRenderPipelineState? {
+        do {
+            let library = try device.makeLibrary(source: shaderSource, options: nil)
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = library.makeFunction(name: "lm_vertex")
+            desc.fragmentFunction = library.makeFunction(name: "lm_fragment")
+            desc.colorAttachments[0].pixelFormat = .rgba8Unorm
+            return try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            NSLog("PillMusic: shader indisponible – \(error)")
+            return nil
+        }
+    }
 
-    // Les clics traversent la vue Metal pour atteindre le bouton SwiftUI.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    static func makeSampler(device: MTLDevice) -> MTLSamplerState? {
+        let s = MTLSamplerDescriptor()
+        s.minFilter = .linear; s.magFilter = .linear; s.mipFilter = .linear
+        s.sAddressMode = .clampToEdge; s.tAddressMode = .clampToEdge
+        return device.makeSamplerState(descriptor: s)
+    }
 
-    /// Couleur dominante + 2 accents de la pochette.
-    func setTints(_ colors: [NSColor]) {
-        guard let first = colors.first else { return }
+    /// Couleur dominante + 2 accents. Canal alpha : intensité (dominante) ou part de l'accent.
+    func setPalette(_ palette: Palette.Colors) {
+        guard let first = palette.tints.first else { return }
         for i in 0..<3 {
-            let color = i < colors.count ? colors[i] : first
+            let color = i < palette.tints.count ? palette.tints[i] : first
             let c = color.usingColorSpace(.sRGB) ?? color
-            targetTints[i] = SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), 1)
+            let alpha: Float = i == 0 ? palette.strength : (i - 1 < palette.coverage.count ? palette.coverage[i - 1] : 0)
+            targetTints[i] = SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), alpha)
         }
     }
 
     /// Petite accélération du métal liquide au clic.
     func boost() { boostAmount = 7 }
 
-    private func setup(_ device: MTLDevice) {
-        queue = device.makeCommandQueue()
-        do {
-            let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
-            let desc = MTLRenderPipelineDescriptor()
-            desc.vertexFunction = library.makeFunction(name: "lm_vertex")
-            desc.fragmentFunction = library.makeFunction(name: "lm_fragment")
-            desc.colorAttachments[0].pixelFormat = colorPixelFormat
-            pipeline = try device.makeRenderPipelineState(descriptor: desc)
-        } catch {
-            NSLog("PillMusic: shader indisponible – \(error)")
-        }
-        shapeTexture = ShapeTexture.make(device: device)
-        let s = MTLSamplerDescriptor()
-        s.minFilter = .linear; s.magFilter = .linear; s.mipFilter = .linear
-        s.sAddressMode = .clampToEdge; s.tAddressMode = .clampToEdge
-        sampler = device.makeSamplerState(descriptor: s)
-    }
-
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-
-    func draw(in view: MTKView) {
+    private func tick() {
         let now = CACurrentMediaTime()
         let dt = Float(min(now - lastTimestamp, 0.1))
         lastTimestamp = now
@@ -118,54 +139,152 @@ final class LiquidMetalView: MTKView, MTKViewDelegate {
         // Transitions douces de vitesse et de couleur.
         speed += (targetSpeed - speed) * min(1, dt * 3)
         boostAmount *= exp(-dt * 2.6)
-        time += dt * (speed + boostAmount)
-        var tintSettled = true
-        for i in 0..<3 {
-            currentTints[i] += (targetTints[i] - currentTints[i]) * min(1, dt * 3.5)
-            if simd_reduce_max(simd_abs(targetTints[i] - currentTints[i])) >= 0.002 { tintSettled = false }
-        }
-
-        // À l'arrêt (pause) : image figée, redessinée lentement (10 i/s) pour économiser la batterie.
-        // On continue de redessiner : macOS peut vider la vue Metal (veille, changement de bureau).
         let moving = speed + boostAmount > 0.002
         if !moving { speed = 0; boostAmount = 0 }
-        let fps = (moving || !tintSettled) ? 60 : 10
-        if preferredFramesPerSecond != fps { preferredFramesPerSecond = fps }
+        time += dt * (speed + boostAmount)
+        var settled = true
+        for i in 0..<3 {
+            currentTints[i] += (targetTints[i] - currentTints[i]) * min(1, dt * 3.5)
+            if simd_reduce_max(simd_abs(targetTints[i] - currentTints[i])) >= 0.002 { settled = false }
+        }
 
-        guard let window, window.occlusionState.contains(.visible),
-              let pipeline, let queue, let shapeTexture, let sampler,
-              let pass = currentRenderPassDescriptor, let drawable = currentDrawable,
-              let buffer = queue.makeCommandBuffer(),
-              let encoder = buffer.makeRenderCommandEncoder(descriptor: pass)
-        else { return }
+        let scale = window?.backingScaleFactor ?? 2
+        if scale != pixelScale { pixelScale = scale; needsFrame = true }
+        let px = max(8, Int((pointSize * pixelScale).rounded()))
+        if target?.width != px { needsFrame = true }
 
-        var u = Uniforms(
-            tint: currentTints[0],
-            tint2: currentTints[1],
-            tint3: currentTints[2],
+        // En pause : image figée, plus aucun calcul.
+        guard moving || !settled || needsFrame || frame == nil else { return }
+        if let window, !window.occlusionState.contains(.visible) { return }
+        guard !inFlight else { return }
+        render(pixels: px)
+    }
+
+    private func render(pixels px: Int) {
+        guard let device, let queue, let pipeline, let shapeTexture, let sampler else { return }
+        if target?.width != px {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: px, height: px, mipmapped: false)
+            td.usage = [.renderTarget]
+            td.storageMode = .shared
+            target = device.makeTexture(descriptor: td)
+        }
+        guard let target, let cb = queue.makeCommandBuffer() else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
+
+        var u = LiquidUniforms(
+            tint: currentTints[0], tint2: currentTints[1], tint3: currentTints[2],
             back: SIMD4(0, 0, 0, 0),
-            viewSize: SIMD2(Float(drawableSize.width), Float(drawableSize.height)),
+            viewSize: SIMD2(Float(px), Float(px)),
             time: time,
             softness: 0.1, repetition: 1.99, shiftRed: 0.3, shiftBlue: 0.3,
             distortion: 0.07, contour: 0.54, angle: 70,
             designRes: 320
         )
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
-        encoder.setFragmentTexture(shapeTexture, index: 0)
-        encoder.setFragmentSamplerState(sampler, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
-        buffer.present(drawable)
-        buffer.commit()
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentBytes(&u, length: MemoryLayout<LiquidUniforms>.stride, index: 0)
+        enc.setFragmentTexture(shapeTexture, index: 0)
+        enc.setFragmentSamplerState(sampler, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
+
+        inFlight = true
+        needsFrame = false
+        cb.addCompletedHandler { [weak self] _ in
+            var bytes = [UInt8](repeating: 0, count: px * px * 4)
+            target.getBytes(&bytes, bytesPerRow: px * 4, from: MTLRegionMake2D(0, 0, px, px), mipmapLevel: 0)
+            let image = bytes.withUnsafeMutableBytes { ptr in
+                CGContext(data: ptr.baseAddress, width: px, height: px, bitsPerComponent: 8, bytesPerRow: px * 4,
+                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.inFlight = false
+                if let image { self.frame = image }
+            }
+        }
+        cb.commit()
     }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        layer?.isOpaque = false
+    /// Outil de vérification : rend le bouton (fond + métal) pour une pochette donnée, en PNG.
+    /// Usage : PillMusic --render-test pochette.png sortie.png
+    static func renderTest(artwork: NSImage, to url: URL, size: Int = 320, times: [Float] = [3, 11, 27]) {
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
+              let library = try? device.makeLibrary(source: shaderSource, options: nil) else { return }
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "lm_vertex")
+        desc.fragmentFunction = library.makeFunction(name: "lm_fragment")
+        desc.colorAttachments[0].pixelFormat = .rgba8Unorm
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: desc),
+              let shape = ShapeTexture.make(device: device) else { return }
+        let sd = MTLSamplerDescriptor()
+        sd.minFilter = .linear; sd.magFilter = .linear; sd.mipFilter = .linear
+        sd.sAddressMode = .clampToEdge; sd.tAddressMode = .clampToEdge
+        let sampler = device.makeSamplerState(descriptor: sd)
+
+        let palette = Palette.extract(from: artwork) ?? .fallback
+        var tints: [SIMD4<Float>] = []
+        for i in 0..<3 {
+            let color = i < palette.tints.count ? palette.tints[i] : palette.tints[0]
+            let c = color.usingColorSpace(.sRGB) ?? color
+            let alpha: Float = i == 0 ? palette.strength : palette.coverage[i - 1]
+            tints.append(SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), alpha))
+        }
+        let disc = palette.disc.usingColorSpace(.sRGB) ?? palette.disc
+
+        // Planche : pochette + 3 instants du shader côte à côte.
+        let n = times.count + 1
+        let sheet = CGContext(data: nil, width: size * n, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        sheet.setFillColor(CGColor(gray: 1, alpha: 1)); sheet.fill(CGRect(x: 0, y: 0, width: size * n, height: size))
+        if let cg = artwork.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            sheet.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
+        }
+        for (k, time) in times.enumerated() {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
+            td.usage = [.renderTarget]
+            td.storageMode = .shared
+            guard let target = device.makeTexture(descriptor: td), let cb = queue.makeCommandBuffer() else { return }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = target
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            pass.colorAttachments[0].storeAction = .store
+            var u = LiquidUniforms(tint: tints[0], tint2: tints[1], tint3: tints[2], back: SIMD4(0, 0, 0, 0),
+                             viewSize: SIMD2(Float(size), Float(size)), time: time,
+                             softness: 0.1, repetition: 1.99, shiftRed: 0.3, shiftBlue: 0.3,
+                             distortion: 0.07, contour: 0.54, angle: 70, designRes: 320)
+            let enc = cb.makeRenderCommandEncoder(descriptor: pass)!
+            enc.setRenderPipelineState(pipeline)
+            enc.setFragmentBytes(&u, length: MemoryLayout<LiquidUniforms>.stride, index: 0)
+            enc.setFragmentTexture(shape, index: 0)
+            enc.setFragmentSamplerState(sampler, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            enc.endEncoding()
+            cb.commit(); cb.waitUntilCompleted()
+            var bytes = [UInt8](repeating: 0, count: size * size * 4)
+            target.getBytes(&bytes, bytesPerRow: size * 4, from: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0)
+            let img = CGContext(data: &bytes, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!.makeImage()!
+            let x = CGFloat(size * (k + 1))
+            sheet.setFillColor(disc.cgColor)
+            sheet.fillEllipse(in: CGRect(x: x, y: 0, width: CGFloat(size), height: CGFloat(size)))
+            sheet.draw(img, in: CGRect(x: x, y: 0, width: CGFloat(size), height: CGFloat(size)))
+        }
+        if let out = sheet.makeImage(), let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, out, nil)
+            CGImageDestinationFinalize(dest)
+        }
     }
 
-    private static let shaderSource = #"""
+    static let shaderSource = #"""
     #include <metal_stdlib>
     using namespace metal;
 
@@ -334,10 +453,12 @@ final class LiquidMetalView: MTKView, MTKViewDelegate {
 
         // Palette de la pochette : la dominante et un accent suivent les bandes du métal,
         // le 2e accent passe en reflet diagonal.
+        // La place de chaque accent suit sa surface réelle sur la pochette (canal alpha).
         float flow = 0.5 + 0.5 * sin((direction * 0.5 + 0.35 * noise) * 2.0 * PI);
-        float3 tc = mix(u.tint.rgb, u.tint2.rgb, smoothstep(0.3, 0.7, flow));
+        float cov2 = u.tint2.a;
+        float3 tc = mix(u.tint.rgb, u.tint2.rgb, step(0.001, cov2) * smoothstep(1.0 - cov2 - 0.12, 1.0 - cov2 + 0.12, flow));
         float sweep = 0.5 + 0.5 * sin((uv.x - uv.y) * 4.0 + t * 1.7 + 2.0 * noise);
-        tc = mix(tc, u.tint3.rgb, 0.85 * smoothstep(0.6, 0.95, sweep));
+        tc = mix(tc, u.tint3.rgb, min(1.0, u.tint3.a * 2.5) * 0.85 * smoothstep(0.6, 0.95, sweep));
 
         float colorDispersion = clamp(1.0 - bump, 0.0, 1.0);
         float dispersionRed = colorDispersion;
@@ -364,13 +485,19 @@ final class LiquidMetalView: MTKView, MTKViewDelegate {
         float3 w = float3(thin_strip_1_width, thin_strip_2_width, wide_strip_ratio);
         w[1] -= 0.02 * smoothstep(0.0, 1.0, edge + bump);
         float stripe_r = fract(direction + dispersionRed);
-        float r = getColorChanges(color1.r, color2.r, stripe_r, w, blur + fwidth(stripe_r) + rExtraBlur, bump, tc.r, u.tint.a);
+        float r = getColorChanges(color1.r, color2.r, stripe_r, w, blur + fwidth(stripe_r) + rExtraBlur, bump, tc.r, 0.0);
         float stripe_g = fract(direction);
-        float g = getColorChanges(color1.g, color2.g, stripe_g, w, blur + fwidth(stripe_g) + gExtraBlur, bump, tc.g, u.tint.a);
+        float g = getColorChanges(color1.g, color2.g, stripe_g, w, blur + fwidth(stripe_g) + gExtraBlur, bump, tc.g, 0.0);
         float stripe_b = fract(direction - dispersionBlue);
-        float b = getColorChanges(color1.b, color2.b, stripe_b, w, blur + fwidth(stripe_b), bump, tc.b, u.tint.a);
+        float b = getColorChanges(color1.b, color2.b, stripe_b, w, blur + fwidth(stripe_b), bump, tc.b, 0.0);
 
-        float3 color = clamp(float3(r, g, b), 0.0, 1.0);
+        // Teinte en « incrustation » : garde la vraie nuance de la pochette
+        // (la densité couleur de Paper faisait glisser vert → cyan, violet → bleu).
+        float3 base = clamp(float3(r, g, b), 0.0, 1.0);
+        // Courbe de contraste : ramène le métal vers les tons moyens, où la couleur s'exprime le plus.
+        float3 shaped = pow(base, float3(1.7));
+        float3 overlay = select(1.0 - 2.0 * (1.0 - shaped) * (1.0 - tc), 2.0 * shaped * tc, shaped < 0.5);
+        float3 color = clamp(mix(base, overlay, u.tint.a), 0.0, 1.0);
         if (any(isnan(color))) { color = float3(0.5); }
         opacity = isnan(opacity) ? 0.0 : opacity;
         color *= opacity;
