@@ -51,9 +51,29 @@ final class MusicController: ObservableObject {
         ws.addObserver(self, selector: #selector(appsChanged(_:)), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
         ws.addObserver(self, selector: #selector(appsChanged(_:)), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
-        timer?.tolerance = 0.3
+        scheduleTimer()
         refresh()
+        // La cadence d'interrogation dépend de la lecture et de l'alimentation.
+        stateSink = $state.removeDuplicates().combineLatest(PowerMonitor.shared.$onBattery, PowerMonitor.shared.$lowPower)
+            .dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.scheduleTimer() } }
+    }
+
+    private var stateSink: AnyCancellable?
+
+    /// Musique prévient déjà de chaque changement (notification) : l'interrogation ne sert qu'à recaler
+    /// la position, la position est extrapolée localement entre deux. En pause ou fermée, on espace beaucoup.
+    private func scheduleTimer() {
+        let saving = PowerMonitor.shared.saving
+        let interval: TimeInterval
+        switch state {
+        case .playing: interval = saving ? 4 : 2
+        case .notRunning: interval = 10
+        default: interval = saving ? 10 : 5
+        }
+        if let timer, abs(timer.timeInterval - interval) < 0.01 { return }
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.refresh() }
+        timer?.tolerance = interval * 0.25
     }
 
     @objc private func playerInfoChanged() { refresh() }

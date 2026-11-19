@@ -106,17 +106,23 @@ struct PillRoot: View {
                 .overlay(Capsule().strokeBorder(scheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.05), lineWidth: 0.5))
         )
         .clipShape(Capsule())
+        // Ombre portée par la seule forme de la pilule : elle n'est pas recalculée
+        // à chaque image du shader (gros gain d'énergie pendant la lecture).
+        .background(
+            Capsule().fill(c.bg)
+                .shadow(color: .black.opacity(scheme == .dark ? 0.45 : (ui.isDragging ? 0.22 : 0.13)),
+                        radius: (ui.isDragging ? 26 : 14) * S * 2, y: (ui.isDragging ? 14 : 6) * S * 2)
+                .animation(.spring(response: 0.3, dampingFraction: 0.5), value: ui.isDragging)
+        )
         .hitZone(.pill)
         // Effets « bubbly » : survol, lévitation pendant le déplacement, squash & stretch.
         .scaleEffect(x: ui.squash.width, y: ui.squash.height)
         .scaleEffect(ui.isDragging ? 1.045 : 1)
-        .shadow(color: .black.opacity(scheme == .dark ? 0.45 : (ui.isDragging ? 0.22 : 0.13)),
-                radius: (ui.isDragging ? 26 : 14) * S * 2, y: (ui.isDragging ? 14 : 6) * S * 2)
-                .animation(.spring(response: 0.3, dampingFraction: 0.5), value: ui.isDragging)
         // Apparition / disparition avec Musique
         .scaleEffect(ui.shown ? 1 : 0.55)
         .blur(radius: ui.shown ? 0 : 6)
         .opacity(ui.shown ? 1 : 0)
+        .offset(x: expanded ? ui.edgeShift : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .coordinateSpace(name: "root")
         .contentShape(Rectangle())
@@ -207,8 +213,10 @@ struct InfoColumn: View {
         let (title, artist) = texts
         VStack(alignment: .leading, spacing: 27 * S * 0.6) {
             VStack(alignment: .leading, spacing: 4 * S) {
-                Marquee(text: title, font: Design.font(max(40 * S, 12)), color: colors.title, lineHeight: max(48 * S, 14))
-                Marquee(text: artist, font: Design.font(max(20 * S, 9)), color: colors.secondary, lineHeight: max(24 * S, 11))
+                Marquee(text: title, font: Design.font(max(40 * S, 12)), color: colors.title, lineHeight: max(48 * S, 14),
+                        paused: music.state != .playing)
+                Marquee(text: artist, font: Design.font(max(20 * S, 9)), color: colors.secondary, lineHeight: max(24 * S, 11),
+                        paused: music.state != .playing)
             }
             .id(music.track?.id ?? title)
             .transition(.asymmetric(
@@ -250,7 +258,7 @@ struct ProgressRow: View {
     private var scrub: Double? { get { _scrubBox.wrappedValue } nonmutating set { _scrubBox.wrappedValue = newValue } }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: music.state == .playing ? 0.25 : 60)) { ctx in
+        TimelineView(.periodic(from: .now, by: music.state == .playing ? (PowerMonitor.shared.saving ? 0.5 : 0.25) : 60)) { ctx in
             let duration = music.track?.duration ?? 0
             let position = scrub.map { $0 * duration } ?? music.position(at: ctx.date)
             let fraction = duration > 0 ? position / duration : 0
@@ -313,6 +321,8 @@ struct Marquee: View {
     let font: Font
     let color: Color
     let lineHeight: CGFloat
+    /// En pause, le défilement s'arrête (aucun rafraîchissement inutile).
+    var paused = false
 
     private let _textWidthBox = State<CGFloat>(initialValue: 0)
     private var textWidth: CGFloat { get { _textWidthBox.wrappedValue } nonmutating set { _textWidthBox.wrappedValue = newValue } }
@@ -324,7 +334,7 @@ struct Marquee: View {
             let overflow = textWidth > g.size.width + 0.5
             Group {
                 if overflow {
-                    TimelineView(.animation(minimumInterval: 1.0 / 60)) { ctx in
+                    TimelineView(.animation(minimumInterval: PowerMonitor.shared.saving ? 1.0 / 30 : 1.0 / 60, paused: paused)) { ctx in
                         let gap: CGFloat = 36
                         let speed: CGFloat = 26
                         let delay = 2.2

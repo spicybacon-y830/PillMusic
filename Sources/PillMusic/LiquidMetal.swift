@@ -60,9 +60,20 @@ final class ShaderRenderer: ObservableObject {
 
     @Published private(set) var frame: CGImage?
     private(set) var pixelScale: CGFloat = 2
-    var pointSize: CGFloat = 40
-    var targetSpeed: Float = 1
-    weak var window: NSWindow?
+    var pointSize: CGFloat = 40 { didSet { if pointSize != oldValue { wake() } } }
+    var targetSpeed: Float = 1 { didSet { if targetSpeed != oldValue { wake() } } }
+    weak var window: NSWindow? {
+        didSet {
+            occlusionObserver.map(NotificationCenter.default.removeObserver)
+            occlusionObserver = window.map { w in
+                NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                                       object: w, queue: .main) { [weak self] _ in self?.wake() }
+            }
+            wake()
+        }
+    }
+    private var occlusionObserver: NSObjectProtocol?
+    private var powerSink: AnyCancellable?
 
     private var device: MTLDevice?
     private var queue: MTLCommandQueue?
@@ -91,9 +102,26 @@ final class ShaderRenderer: ObservableObject {
         shapeTexture = ShapeTexture.make(device: device)
         sampler = Self.makeSampler(device: device)
 
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
+        // Change de cadence quand on passe sur batterie ou en mode économie d'énergie.
+        powerSink = PowerMonitor.shared.$onBattery.combineLatest(PowerMonitor.shared.$lowPower)
+            .dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.stopTimer(); self?.wake() }
+        wake()
+    }
+
+    /// Relance la boucle de rendu ; elle s'arrête d'elle-même quand plus rien ne bouge.
+    private func wake() {
+        guard timer == nil else { return }
+        lastTimestamp = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / PowerMonitor.shared.shaderFPS, repeats: true) { [weak self] _ in self?.tick() }
+        timer.tolerance = 0.002
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
     }
 
     static func makePipeline(device: MTLDevice) -> MTLRenderPipelineState? {
@@ -126,10 +154,11 @@ final class ShaderRenderer: ObservableObject {
             let alpha: Float = i == 0 ? palette.strength : (i - 1 < palette.coverage.count ? palette.coverage[i - 1] : 0)
             targetTints[i] = SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), alpha)
         }
+        wake()
     }
 
     /// Petite accélération du métal liquide au clic.
-    func boost() { boostAmount = 7 }
+    func boost() { boostAmount = 7; wake() }
 
     private func tick() {
         let now = CACurrentMediaTime()
@@ -153,9 +182,13 @@ final class ShaderRenderer: ObservableObject {
         let px = max(8, Int((pointSize * pixelScale).rounded()))
         if target?.width != px { needsFrame = true }
 
-        // En pause : image figée, plus aucun calcul.
-        guard moving || !settled || needsFrame || frame == nil else { return }
-        if let window, !window.occlusionState.contains(.visible) { return }
+        // En pause : image figée, et la boucle s'endort complètement (0 réveil par seconde).
+        guard moving || !settled || needsFrame || frame == nil else {
+            if !inFlight { stopTimer() }
+            return
+        }
+        // Fenêtre cachée ou écran en veille : on s'arrête, la notification d'occlusion nous réveillera.
+        if let window, !window.occlusionState.contains(.visible) { stopTimer(); return }
         guard !inFlight else { return }
         render(pixels: px)
     }

@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import CoreText
 import SwiftUI
@@ -11,6 +12,8 @@ final class UIState: ObservableObject {
     var frames: [HitZone: CGRect] = [:]
     /// Pilule ouverte (survol). Zone fixe avec hystérésis : pas de bascule pendant l'animation.
     @Published private(set) var expanded = false
+    /// Décalage horizontal de la pilule ouverte quand elle est collée à un bord de l'écran.
+    @Published private(set) var edgeShift: CGFloat = 0
     var pillScale: CGFloat = 0.25
     var canExpand = false { didSet { updateExpanded() } }
     @Published var isDragging = false
@@ -44,7 +47,28 @@ final class UIState: ObservableObject {
         let windowHeight = Design.height * pillScale + m * 2
         let w = (Design.width + (expanded ? Design.skipExtra : 0)) * pillScale
         let h = Design.height * pillScale
-        return CGRect(x: (windowWidth - w) / 2, y: (windowHeight - h) / 2, width: w, height: h)
+        let shift = expanded ? edgeShift : 0
+        return CGRect(x: (windowWidth - w) / 2 + shift, y: (windowHeight - h) / 2, width: w, height: h)
+    }
+
+    /// Près d'un bord, la pilule ouverte s'écarte du bord au lieu de sortir de l'écran.
+    private func neededEdgeShift() -> CGFloat {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return 0 }
+        let vf = screen.visibleFrame
+        let m = PillPanel.margin
+        let windowWidth = (Design.width + Design.skipExtra) * pillScale + m * 2
+        let w = (Design.width + Design.skipExtra) * pillScale
+        let minX = window.frame.minX + (windowWidth - w) / 2, maxX = minX + w
+        if minX < vf.minX + PillPanel.edgeInset { return vf.minX + PillPanel.edgeInset - minX }
+        if maxX > vf.maxX - PillPanel.edgeInset { return vf.maxX - PillPanel.edgeInset - maxX }
+        return 0
+    }
+
+    /// Recalcule le décalage après un déplacement, si la pilule est restée ouverte.
+    func refreshEdgeShift() {
+        guard expanded else { return }
+        let shift = neededEdgeShift()
+        if abs(shift - edgeShift) > 0.5 { withAnimation(Design.island) { edgeShift = shift } }
     }
 
     func updateExpanded() {
@@ -54,7 +78,10 @@ final class UIState: ObservableObject {
             open = pillRect(expanded: expanded).insetBy(dx: -3, dy: -3).contains(p)
         }
         // Une seule transaction animée : fond, boutons et bouton play bougent ensemble.
-        if open != expanded { withAnimation(Design.island) { expanded = open } }
+        if open != expanded {
+            let shift = open ? neededEdgeShift() : 0
+            withAnimation(Design.island) { expanded = open; edgeShift = shift }
+        }
     }
 
     func isHovering(_ zone: HitZone) -> Bool {
@@ -117,20 +144,23 @@ final class UIState: ObservableObject {
         withAnimation(.spring(response: 0.45, dampingFraction: 0.35)) { squash = CGSize(width: 1, height: 1) }
         keepOnScreen()
         onMoved?()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.refreshEdgeShift() }
     }
 
     /// Ramène la pilule dans l'écran si elle a été lâchée trop au bord.
+    /// On se base sur la pilule fermée : elle peut aller jusque dans les coins.
     func keepOnScreen() {
         guard let window, let screen = window.screen ?? NSScreen.main else { return }
-        let inset = PillPanel.margin
         let visible = screen.visibleFrame
         var f = window.frame
-        let pill = f.insetBy(dx: inset, dy: inset)
+        let local = pillRect(expanded: false)
+        let pill = CGRect(x: f.minX + local.minX, y: f.minY + local.minY, width: local.width, height: local.height)
+        let e = PillPanel.edgeInset
         var shift = CGPoint.zero
-        if pill.minX < visible.minX + 8 { shift.x = visible.minX + 8 - pill.minX }
-        if pill.maxX > visible.maxX - 8 { shift.x = visible.maxX - 8 - pill.maxX }
-        if pill.minY < visible.minY + 8 { shift.y = visible.minY + 8 - pill.minY }
-        if pill.maxY > visible.maxY - 8 { shift.y = visible.maxY - 8 - pill.maxY }
+        if pill.minX < visible.minX + e { shift.x = visible.minX + e - pill.minX }
+        if pill.maxX > visible.maxX - e { shift.x = visible.maxX - e - pill.maxX }
+        if pill.minY < visible.minY + e { shift.y = visible.minY + e - pill.minY }
+        if pill.maxY > visible.maxY - e { shift.y = visible.maxY - e - pill.maxY }
         guard shift != .zero else { return }
         f.origin.x += shift.x; f.origin.y += shift.y
         NSAnimationContext.runAnimationGroup { ctx in
@@ -173,6 +203,8 @@ final class UIState: ObservableObject {
 
 final class PillPanel: NSPanel {
     static let margin: CGFloat = 48
+    /// Distance minimale entre la pilule et les bords de l'écran.
+    static let edgeInset: CGFloat = 8
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -185,6 +217,10 @@ final class PillPanel: NSPanel {
         isMovable = false
         isReleasedWhenClosed = false
     }
+
+    /// La fenêtre est plus grande que la pilule (ombre, ouverture) : on gère nous-mêmes les bords,
+    /// macOS ne doit pas la repousser sous la barre des menus.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -237,6 +273,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
     /// Affichée à la main (relance de l'app alors que Musique est fermée).
     private var forceShown = false
+    /// Masquée avec le raccourci : reste cachée jusqu'au prochain raccourci (ou relance de Musique).
+    private var userHidden = false
+    private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         registerFonts()
@@ -277,11 +316,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // La pilule apparaît quand Musique est ouverte et disparaît quand on la ferme.
         music.$state.map { $0 != .notRunning }.removeDuplicates().sink { [weak self] running in
             guard let self else { return }
-            if running { self.forceShown = false }
-            self.setVisible(running || self.forceShown)
+            if running { self.forceShown = false; self.userHidden = false }
+            self.setVisible(!self.userHidden && (running || self.forceShown))
         }.store(in: &cancellables)
 
         music.start()
+
+        // ⌃⌘M : afficher / masquer la pilule depuis n'importe quelle app.
+        hotKey = GlobalHotKey(character: "m", modifiers: UInt32(controlKey | cmdKey)) { [weak self] in self?.togglePill() }
 
         // Première ouverture depuis Applications : active l'ouverture au démarrage (désactivable au clic droit).
         let d = UserDefaults.standard
@@ -294,8 +336,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Relancer PillMusic (Spotlight, Applications) affiche la pilule même si Musique est fermée.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         forceShown = true
+        userHidden = false
         setVisible(true)
         return false
+    }
+
+    private func togglePill() {
+        if ui.shown {
+            userHidden = true
+            setVisible(false)
+        } else {
+            userHidden = false
+            if music.state == .notRunning { forceShown = true }
+            setVisible(true)
+        }
     }
 
     private func setVisible(_ visible: Bool) {
@@ -393,6 +447,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lookItem = NSMenuItem(title: "Apparence", action: nil, keyEquivalent: "")
         lookItem.submenu = lookMenu
         menu.addItem(lookItem)
+
+        let hide = ActionItem("Masquer la pilule") { [weak self] in self?.togglePill() }
+        hide.keyEquivalent = "m"
+        hide.keyEquivalentModifierMask = [.control, .command]
+        menu.addItem(hide)
 
         let login = ActionItem("Ouvrir au démarrage") { [weak self] in self?.settings.toggleLaunchAtLogin() }
         login.state = settings.launchAtLogin ? .on : .off
