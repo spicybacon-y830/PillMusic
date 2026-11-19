@@ -44,7 +44,7 @@ final class UIState: ObservableObject {
     func pillRect(expanded: Bool) -> CGRect {
         let m = PillPanel.margin
         let windowWidth = (Design.width + Design.skipExtra) * pillScale + m * 2
-        let windowHeight = Design.height * pillScale + m * 2
+        let windowHeight = Design.height * pillScale + PillPanel.marginY * 2
         let w = (Design.width + (expanded ? Design.skipExtra : 0)) * pillScale
         let h = Design.height * pillScale
         let shift = expanded ? edgeShift : 0
@@ -161,8 +161,15 @@ final class UIState: ObservableObject {
         if pill.maxX > visible.maxX - e { shift.x = visible.maxX - e - pill.maxX }
         if pill.minY < visible.minY + e { shift.y = visible.minY + e - pill.minY }
         if pill.maxY > visible.maxY - e { shift.y = visible.maxY - e - pill.maxY }
-        guard shift != .zero else { return }
         f.origin.x += shift.x; f.origin.y += shift.y
+        // La fenêtre (zones transparentes comprises) ne doit jamais recouvrir un bord où vit le Dock
+        // ou la barre des menus : sinon le Dock masqué ne se déclenche plus.
+        let sf = screen.frame
+        if visible.minY > sf.minY, f.minY < sf.minY { shift.y += sf.minY - f.minY; f.origin.y = sf.minY }
+        if visible.maxY < sf.maxY, f.maxY > sf.maxY { shift.y += sf.maxY - f.maxY; f.origin.y = sf.maxY - f.height }
+        if visible.minX > sf.minX, f.minX < sf.minX { shift.x += sf.minX - f.minX; f.origin.x = sf.minX }
+        if visible.maxX < sf.maxX, f.maxX > sf.maxX { shift.x += sf.maxX - f.maxX; f.origin.x = sf.maxX - f.width }
+        guard shift != .zero else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.28
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 1.3, 0.4, 1)
@@ -203,6 +210,8 @@ final class UIState: ObservableObject {
 
 final class PillPanel: NSPanel {
     static let margin: CGFloat = 48
+    /// Marge verticale plus courte : juste la place de l'ombre et de l'étirement.
+    static let marginY: CGFloat = 24
     /// Distance minimale entre la pilule et les bords de l'écran.
     static let edgeInset: CGFloat = 8
 
@@ -276,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Masquée avec le raccourci : reste cachée jusqu'au prochain raccourci (ou relance de Musique).
     private var userHidden = false
     private var hotKey: GlobalHotKey?
+    private var mouseMonitors: [Any] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         registerFonts()
@@ -322,6 +332,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         music.start()
 
+        // La fenêtre est plus grande que la pilule : ses zones transparentes laissent passer la souris
+        // (sinon elles bloquent le Dock masqué, les coins actifs, les fenêtres dessous…).
+        panel.ignoresMouseEvents = true
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { [weak self] _ in
+            self?.updateMousePassthrough()
+        }) { mouseMonitors.append(m) }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseUp], handler: { [weak self] e in
+            DispatchQueue.main.async { self?.updateMousePassthrough() }
+            return e
+        }) { mouseMonitors.append(m) }
+
         // ⌃⌘M : afficher / masquer la pilule depuis n'importe quelle app.
         hotKey = GlobalHotKey(character: "m", modifiers: UInt32(controlKey | cmdKey)) { [weak self] in self?.togglePill() }
 
@@ -339,6 +360,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userHidden = false
         setVisible(true)
         return false
+    }
+
+    private func updateMousePassthrough() {
+        guard panel.isVisible, ui.shown else { panel.ignoresMouseEvents = true; return }
+        if ui.isDragging { panel.ignoresMouseEvents = false; return }
+        let m = NSEvent.mouseLocation, f = panel.frame
+        let local = CGPoint(x: m.x - f.minX, y: f.maxY - m.y)
+        let inside = ui.pillRect(expanded: ui.expanded).insetBy(dx: -3, dy: -3).contains(local)
+        if panel.ignoresMouseEvents == inside {
+            panel.ignoresMouseEvents = !inside
+            if inside { ui.pointer = local } else { ui.pointer = nil }
+        }
     }
 
     private func togglePill() {
@@ -369,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func layoutWindow(keepCenter center: CGPoint) {
         let s = settings.size.scale
         let w = (Design.width + Design.skipExtra) * s + PillPanel.margin * 2
-        let h = Design.height * s + PillPanel.margin * 2
+        let h = Design.height * s + PillPanel.marginY * 2
         panel.setFrame(NSRect(x: center.x - w / 2, y: center.y - h / 2, width: w, height: h), display: true)
         ui.keepOnScreen()
     }

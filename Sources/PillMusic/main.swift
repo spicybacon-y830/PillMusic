@@ -27,7 +27,7 @@ if args.count >= 3, args[1] == "--render-pill" {
             let s = settings.size.scale
             let view = PillRoot(music: music, settings: settings, ui: ui)
                 .frame(width: (Design.width + Design.skipExtra) * s + PillPanel.margin * 2,
-                       height: Design.height * s + PillPanel.margin * 2)
+                       height: Design.height * s + PillPanel.marginY * 2)
                 .background(Color(white: 0.8))
                 .environment(\.colorScheme, dark ? .dark : .light)
             let r = ImageRenderer(content: view); r.scale = 3
