@@ -285,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Masquée avec le raccourci : reste cachée jusqu'au prochain raccourci (ou relance de Musique).
     private var userHidden = false
     private var hotKey: GlobalHotKey?
+    private var statusItem: NSStatusItem?
     private var mouseMonitors: [Any] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -345,6 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ⌃⌘M : afficher / masquer la pilule depuis n'importe quelle app.
         hotKey = GlobalHotKey(character: "m", modifiers: UInt32(controlKey | cmdKey)) { [weak self] in self?.togglePill() }
+        setupStatusItem()
 
         // Première ouverture depuis Applications : active l'ouverture au démarrage (désactivable au clic droit).
         let d = UserDefaults.standard
@@ -454,7 +456,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Menu clic droit
 
+    // MARK: Icône dans la barre des menus
+
+    /// Clic : afficher / masquer la pilule. Clic droit (ou ⌥-clic) : le menu.
+    private func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            button.image = Self.mascotIcon()
+            button.toolTip = "PillMusic — afficher / masquer (⌃⌘M)"
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        statusItem = item
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.option) == true {
+            guard let item = statusItem else { return }
+            item.menu = buildMenu()
+            item.button?.performClick(nil)
+            item.menu = nil // le clic gauche doit rester une action, pas un menu
+        } else {
+            togglePill()
+        }
+    }
+
+    /// La mascotte dans la barre des menus.
+    static func mascotIcon() -> NSImage {
+        // Logo fourni (blanc sur fond transparent, Resources/MenuIcon.png) en image « modèle » :
+        // macOS l'affiche en blanc sur une barre sombre (et en noir sur une barre claire).
+        guard let src = Bundle.main.image(forResource: "MenuIcon") else {
+            return NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) ?? NSImage()
+        }
+        let h: CGFloat = 16
+        let w = h * src.size.width / max(src.size.height, 1)
+        let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { rect in
+            src.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
     private func showMenu(_ event: NSEvent) {
+        NSMenu.popUpContextMenu(buildMenu(), with: event, for: host)
+    }
+
+    private func buildMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(ActionItem("Ouvrir Musique") { [weak self] in self?.music.openMusic() })
         menu.addItem(ActionItem("Morceau suivant") { [weak self] in self?.ui.skipDirection = 1; self?.music.next() })
@@ -492,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(ActionItem("Quitter PillMusic") { NSApp.terminate(nil) })
 
-        NSMenu.popUpContextMenu(menu, with: event, for: host)
+        return menu
     }
 }
 
