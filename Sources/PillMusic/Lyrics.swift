@@ -293,7 +293,7 @@ struct LyricsView: View {
     private func note(k: CGFloat) -> some View {
         Image(systemName: "music.note")
             .font(.system(size: 13 * k, weight: .semibold))
-            .foregroundStyle(scheme == .dark ? Color.white : Color(white: 0.12))
+            .foregroundStyle(Color.white)
             .frame(height: 19 * k)
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
@@ -301,7 +301,7 @@ struct LyricsView: View {
     private func line(_ text: String, k: CGFloat) -> some View {
         Text(text)
             .font(Design.font(15 * k))
-            .foregroundStyle(scheme == .dark ? Color.white : Color(white: 0.12))
+            .foregroundStyle(Color.white)
             .multilineTextAlignment(.trailing)
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
