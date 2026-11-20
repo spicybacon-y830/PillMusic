@@ -235,6 +235,9 @@ struct LyricsView: View {
                 column(k: k)
             }
         }
+        // Contraste sur les fenêtres claires : un voile sombre très diffus, sans contour dur.
+        .shadow(color: .black.opacity(0.24), radius: 4.5 * k)
+        .shadow(color: .black.opacity(0.3), radius: 14 * k)
         .animation(.easeInOut(duration: 0.3), value: lyrics.status)
         // Apparition indépendante de la pilule : léger glissement + fondu linéaire.
         .offset(y: shown ? 0 : (below ? -8 : 8) * k)
