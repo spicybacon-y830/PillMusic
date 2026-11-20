@@ -121,30 +121,18 @@ enum Palette {
 
 /// Repli quand Musique ne fournit pas la pochette (fréquent pour le streaming) :
 /// recherche publique d'Apple (iTunes Search API), sans clé.
+/// Pochette de secours (morceau sans image dans Musique) : uniquement si la recherche Apple
+/// retrouve exactement ce morceau (ou son album) — jamais une pochette au hasard.
 enum ArtworkSearch {
     static func find(track: Track, completion: @escaping (NSImage?) -> Void) {
-        var comps = URLComponents(string: "https://itunes.apple.com/search")!
-        let region = Locale.current.region?.identifier ?? "US"
-        comps.queryItems = [
-            .init(name: "term", value: "\(track.artist) \(track.title)"),
-            .init(name: "entity", value: "song"),
-            .init(name: "limit", value: "1"),
-            .init(name: "country", value: region),
-        ]
-        guard let url = comps.url else { return completion(nil) }
-        var req = URLRequest(url: url, timeoutInterval: 8)
-        req.setValue("PillMusic", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            guard let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let first = (json["results"] as? [[String: Any]])?.first,
-                  let small = first["artworkUrl100"] as? String,
+        TrackLink.lookup(track: track) { result in
+            guard let small = result?["artworkUrl100"] as? String,
                   let big = URL(string: small.replacingOccurrences(of: "100x100", with: "600x600"))
             else { return completion(nil) }
             URLSession.shared.dataTask(with: big) { data, _, _ in
                 completion(data.flatMap { NSImage(data: $0) })
             }.resume()
-        }.resume()
+        }
     }
 }
 
@@ -169,21 +157,31 @@ enum TrackLink {
     static func find(track: Track, completion: @escaping (URL?) -> Void) {
         if let cached = cache[track.id] { return completion(cached) }
         let local = (Locale.current.region?.identifier ?? "US").uppercased()
-        // Le catalogue de recherche local omet parfois des versions (souvent explicites) :
-        // repli sur le catalogue américain, puis lien converti vers le pays de l'utilisateur.
-        let stores = local == "US" ? ["US"] : [local, "US"]
-        search(track: track, stores: stores[...]) { url in
-            guard var url else { return completion(nil) }
-            if local != "US", var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-                comps.path = comps.path.replacingOccurrences(of: "/us/", with: "/\(local.lowercased())/")
-                url = comps.url ?? url
-            }
+        lookup(track: track, songOnly: true) { result in
+            guard let link = (result?["trackViewUrl"] as? String).flatMap(URL.init(string:)),
+                  var comps = URLComponents(url: link, resolvingAgainstBaseURL: false)
+            else { return completion(nil) }
+            // Lien propre, sans paramètres de suivi, converti vers le pays de l'utilisateur.
+            let kept = comps.queryItems?.filter { $0.name == "i" }
+            comps.queryItems = kept
+            if local != "US" { comps.path = comps.path.replacingOccurrences(of: "/us/", with: "/\(local.lowercased())/") }
+            let url = comps.url ?? link
             DispatchQueue.main.async { cache[track.id] = url }
             completion(url)
         }
     }
 
-    private static func search(track: Track, stores: ArraySlice<String>, completion: @escaping (URL?) -> Void) {
+    /// Résultat de la recherche Apple qui correspond vraiment au morceau.
+    /// `songOnly` faux : accepte aussi un autre titre du même album (même pochette).
+    static func lookup(track: Track, songOnly: Bool = false, completion: @escaping ([String: Any]?) -> Void) {
+        let local = (Locale.current.region?.identifier ?? "US").uppercased()
+        // Le catalogue de recherche local omet parfois des versions (souvent explicites) : repli sur les États-Unis.
+        let stores = local == "US" ? ["US"] : [local, "US"]
+        search(track: track, songOnly: songOnly, stores: stores[...], completion: completion)
+    }
+
+    private static func search(track: Track, songOnly: Bool, stores: ArraySlice<String>,
+                               completion: @escaping ([String: Any]?) -> Void) {
         guard let store = stores.first else { return completion(nil) }
         var comps = URLComponents(string: "https://itunes.apple.com/search")!
         comps.queryItems = [
@@ -197,26 +195,37 @@ enum TrackLink {
         req.setValue("PillMusic", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: req) { data, _, _ in
             let results = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["results"] as? [[String: Any]] ?? []
-            if let link = bestMatch(in: results, for: track) {
-                completion(link)
+            if let best = bestMatch(in: results, for: track) ?? (songOnly ? nil : albumMatch(in: results, for: track)) {
+                completion(best)
             } else {
-                search(track: track, stores: stores.dropFirst(), completion: completion)
+                search(track: track, songOnly: songOnly, stores: stores.dropFirst(), completion: completion)
             }
         }.resume()
     }
 
-    private static func bestMatch(in results: [[String: Any]], for track: Track) -> URL? {
-        let title = normalize(track.title), artist = normalize(track.artist), album = normalize(track.album)
-        func artistMatches(_ a: String) -> Bool {
-            // Strict : l'artiste exact, éventuellement suivi d'invités — jamais une reprise ou un karaoké.
-            if a == artist { return true }
-            return [" &", ",", " feat", " x "].contains { a.hasPrefix(artist + $0) || artist.hasPrefix(a + $0) }
+    private static func artistMatches(_ a: String, _ artist: String) -> Bool {
+        // Strict : l'artiste exact, éventuellement suivi d'invités — jamais une reprise ou un karaoké.
+        if a == artist { return true }
+        return [" &", ",", " feat", " x "].contains { a.hasPrefix(artist + $0) || artist.hasPrefix(a + $0) }
+    }
+
+    /// Un autre titre du même album, du même artiste : sa pochette est la bonne.
+    private static func albumMatch(in results: [[String: Any]], for track: Track) -> [String: Any]? {
+        let artist = normalize(track.artist), album = fold(track.album)
+        guard !album.isEmpty else { return nil }
+        return results.first {
+            fold($0["collectionName"] as? String ?? "") == album
+                && artistMatches(normalize($0["artistName"] as? String ?? ""), artist)
         }
+    }
+
+    private static func bestMatch(in results: [[String: Any]], for track: Track) -> [String: Any]? {
+        let title = normalize(track.title), artist = normalize(track.artist), album = normalize(track.album)
         func score(_ r: [String: Any]) -> Int {
             let t = normalize(r["trackName"] as? String ?? "")
             let a = normalize(r["artistName"] as? String ?? "")
             let c = normalize(r["collectionName"] as? String ?? "")
-            guard t == title, artistMatches(a) else { return -1 }
+            guard t == title, artistMatches(a, artist) else { return -1 }
             let fullName = fold(r["trackName"] as? String ?? ""), fullCollection = fold(r["collectionName"] as? String ?? "")
             var s = 1
             if fullName == fold(track.title) { s += 3 }
@@ -228,14 +237,7 @@ enum TrackLink {
             if (r["trackExplicitness"] as? String) == "explicit" { s += 1 }
             return s
         }
-        guard let best = results.map({ ($0, score($0)) }).filter({ $0.1 >= 0 }).max(by: { $0.1 < $1.1 })?.0,
-              let link = (best["trackViewUrl"] as? String).flatMap(URL.init(string:)),
-              var clean = URLComponents(url: link, resolvingAgainstBaseURL: false)
-        else { return nil }
-        // Lien propre, sans paramètres de suivi.
-        let kept = clean.queryItems?.filter { $0.name == "i" }
-        clean.queryItems = kept
-        return clean.url ?? link
+        return results.map({ ($0, score($0)) }).filter({ $0.1 >= 0 }).max(by: { $0.1 < $1.1 })?.0
     }
 
     private static let variantWords = ["drumless", "instrumental", "karaoke", "live", "remix", "acoustic", "sped up",

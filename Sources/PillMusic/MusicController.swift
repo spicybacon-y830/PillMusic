@@ -268,6 +268,22 @@ final class MusicController: ObservableObject {
 
     // MARK: - Pochette
 
+    /// Identifiant et image demandés ensemble : impossible de mélanger deux morceaux.
+    private static let artworkScript = """
+    tell application "Music"
+        set t to current track
+        set pid to ""
+        try
+            set pid to persistent ID of t
+        end try
+        try
+            return {pid, raw data of artwork 1 of t}
+        on error
+            return {pid}
+        end try
+    end tell
+    """
+
     private func loadArtwork(for track: Track) {
         artworkTrackID = track.id
         if let cached = artworkCache[track.id] {
@@ -276,9 +292,17 @@ final class MusicController: ObservableObject {
         }
         queue.async {
             var image: NSImage?
-            if case .success(let d) = self.execute("tell application \"Music\" to get raw data of artwork 1 of current track") {
-                let data = d.data
-                if !data.isEmpty { image = NSImage(data: data) }
+            if case .success(let d) = self.execute(Self.artworkScript) {
+                // Le morceau a pu changer pendant la demande : on ne garde la pochette que si c'est le bon.
+                let pid = d.atIndex(1)?.stringValue ?? ""
+                if !pid.isEmpty, !track.id.contains("|"), pid != track.id {
+                    DispatchQueue.main.async {
+                        if self.artworkTrackID == track.id { self.artworkTrackID = nil }
+                        self.refreshSoon()
+                    }
+                    return
+                }
+                if let data = d.atIndex(2)?.data, !data.isEmpty { image = NSImage(data: data) }
             }
             if let image {
                 self.finishArtwork(image, for: track)
