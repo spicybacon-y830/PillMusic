@@ -25,7 +25,7 @@ if args.count >= 3, args[1] == "--render-pill" {
         for (expanded, dark) in [(false, false), (true, false), (true, true)] {
             let ui = UIState(); ui.shown = true; ui.forceExpanded = expanded
             let s = settings.size.scale
-            let view = PillRoot(music: music, settings: settings, ui: ui)
+            let view = PillRoot(music: music, settings: settings, ui: ui, lyrics: LyricsModel(music: music))
                 .frame(width: (Design.width + Design.skipExtra) * s + PillPanel.margin * 2,
                        height: Design.height * s + PillPanel.marginY * 2)
                 .background(Color(white: 0.8))

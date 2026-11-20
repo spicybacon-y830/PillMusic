@@ -12,7 +12,7 @@ enum Design {
     static var height: CGFloat { disc + paddingV * 2 }
     /// Boutons précédent / suivant révélés au survol.
     static let skip: CGFloat = 84
-    static var skipExtra: CGFloat { (skip + gap) * 2 }
+    static var skipExtra: CGFloat { (skip + gap) * 3 }
     /// Ressort de l'ouverture au survol (appliqué à toute la pilule d'un coup, fond compris).
     static let island = Animation.spring(response: 0.5, dampingFraction: 0.5)
     static var infoWidth: CGFloat { width - paddingH * 2 - disc * 2 - gap * 2 }
@@ -37,7 +37,7 @@ extension Color {
     }
 }
 
-enum HitZone: Hashable { case pill, artwork, play, bar, prev, next }
+enum HitZone: Hashable { case pill, artwork, play, bar, prev, next, lyrics }
 
 struct FramesKey: PreferenceKey {
     static var defaultValue: [HitZone: CGRect] = [:]
@@ -60,6 +60,7 @@ struct PillRoot: View {
     @ObservedObject var music: MusicController
     @ObservedObject var settings: Settings
     @ObservedObject var ui: UIState
+    @ObservedObject var lyrics: LyricsModel
     @Environment(\.colorScheme) private var scheme
 
     private var S: CGFloat { settings.scale }
@@ -81,14 +82,22 @@ struct PillRoot: View {
                 .frame(width: Design.infoWidth * S)
 
             // Chaque bouton grandit au même rythme que la place qui s'ouvre : ni débordement, ni découpe.
-            SkipButton(forward: false, size: skip, colors: c, hovering: ui.isHovering(.prev), visible: expanded) {
+            SkipButton(symbol: lyrics.enabled ? "quote.bubble.fill" : "quote.bubble", size: skip, colors: c,
+                       hovering: ui.isHovering(.lyrics), visible: expanded, active: lyrics.enabled, iconScale: 0.46) {
+                lyrics.enabled.toggle()
+            }
+            .hitZone(.lyrics)
+            .frame(width: expanded ? skip : 0)
+            .padding(.leading, expanded ? Design.gap * S : 0)
+
+            SkipButton(symbol: "backward.fill", size: skip, colors: c, hovering: ui.isHovering(.prev), visible: expanded) {
                 ui.skipDirection = -1; music.previous()
             }
             .hitZone(.prev)
             .frame(width: expanded ? skip : 0)
             .padding(.leading, expanded ? Design.gap * S : 0)
 
-            SkipButton(forward: true, size: skip, colors: c, hovering: ui.isHovering(.next), visible: expanded) {
+            SkipButton(symbol: "forward.fill", size: skip, colors: c, hovering: ui.isHovering(.next), visible: expanded) {
                 ui.skipDirection = 1; music.next()
             }
             .hitZone(.next)
@@ -464,11 +473,14 @@ struct PauseGlyph: Shape {
 // MARK: - Boutons précédent / suivant
 
 struct SkipButton: View {
-    let forward: Bool
+    let symbol: String
     let size: CGFloat
     let colors: (bg: Color, title: Color, secondary: Color, track: Color, fill: Color)
     let hovering: Bool
     let visible: Bool
+    var active = false
+    /// Taille de l'icône relative au bouton.
+    var iconScale: CGFloat = 0.36
     let action: () -> Void
 
     private let _pressedBox = State<Bool>(initialValue: false)
@@ -478,8 +490,9 @@ struct SkipButton: View {
         ZStack {
             Circle().fill(colors.track)
             Circle().fill(colors.title.opacity(hovering ? 0.12 : 0))
-            Image(systemName: forward ? "forward.fill" : "backward.fill")
-                .font(.system(size: size * 0.36, weight: .bold))
+            Circle().fill(colors.title.opacity(active ? 0.14 : 0))
+            Image(systemName: symbol)
+                .font(.system(size: size * iconScale, weight: .bold))
                 .foregroundStyle(colors.title)
         }
         .frame(width: size, height: size)

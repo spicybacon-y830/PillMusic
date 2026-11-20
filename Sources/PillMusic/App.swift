@@ -87,7 +87,7 @@ final class UIState: ObservableObject {
     func isHovering(_ zone: HitZone) -> Bool {
         if zone == .pill, let p = pointer { return pillRect(expanded: expanded).contains(p) }
         guard let p = pointer, let f = frames[zone] else { return false }
-        if zone == .play || zone == .artwork || zone == .prev || zone == .next {
+        if zone == .play || zone == .artwork || zone == .prev || zone == .next || zone == .lyrics {
             return hypot(p.x - f.midX, p.y - f.midY) <= f.width / 2
         }
         return f.contains(p)
@@ -231,7 +231,8 @@ final class PillPanel: NSPanel {
     /// macOS ne doit pas la repousser sous la barre des menus.
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 
-    override var canBecomeKey: Bool { true }
+    /// Jamais la fenêtre clavier : après un clic sur la pilule, ⌘V et la saisie restent dans l’app en cours.
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
@@ -287,13 +288,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: GlobalHotKey?
     private var statusItem: NSStatusItem?
     private var mouseMonitors: [Any] = []
+    private lazy var lyrics = LyricsModel(music: music)
+    private let lyricsPlacement = LyricsPlacement()
+    private var lyricsPanel: LyricsPanel!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         registerFonts()
         settings.applyAppearance()
 
         panel = PillPanel()
-        host = PillHostingView(rootView: PillRoot(music: music, settings: settings, ui: ui))
+        host = PillHostingView(rootView: PillRoot(music: music, settings: settings, ui: ui, lyrics: lyrics))
         host.sizingOptions = []
         host.onPointer = { [weak self] p in self?.ui.pointer = p }
         host.onScroll = { [weak self] e in self?.ui.handleScroll(e) }
@@ -332,6 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }.store(in: &cancellables)
 
         music.start()
+        setupLyrics()
 
         // La fenêtre est plus grande que la pilule : ses zones transparentes laissent passer la souris
         // (sinon elles bloquent le Dock masqué, les coins actifs, les fenêtres dessous…).
@@ -374,6 +379,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.ignoresMouseEvents = !inside
             if inside { ui.pointer = local } else { ui.pointer = nil }
         }
+        // Les paroles ne captent la souris (pour le défilement) que lorsqu'on est dessus.
+        if let lyricsPanel {
+            let overLyrics = lyricsPanel.isVisible && lyricsPlacement.shown && lyrics.status == .ready
+                && lyricsPanel.frame.insetBy(dx: LyricsPanel.margin, dy: 0).contains(m)
+            if lyricsPanel.ignoresMouseEvents == overLyrics { lyricsPanel.ignoresMouseEvents = !overLyrics }
+        }
     }
 
     private func togglePill() {
@@ -397,6 +408,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             withAnimation(.easeIn(duration: 0.22)) { ui.shown = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 if !self.ui.shown { self.panel.orderOut(nil) }
+            }
+        }
+    }
+
+    // MARK: Paroles
+
+    /// Hauteur du panneau : deux lignes (la ligne en cours peut passer sur deux lignes).
+    private var lyricsSize: CGSize {
+        let k = settings.scale / 0.25
+        // Même largeur que la pilule fermée, bord droit aligné sur le bouton play.
+        return CGSize(width: (Design.width - 2 * Design.paddingH) * settings.scale + LyricsPanel.margin * 2,
+                      height: 92 * k + LyricsPanel.margin)
+    }
+
+    private func setupLyrics() {
+        lyricsPanel = LyricsPanel()
+        let view = NSHostingView(rootView: LyricsRoot(lyrics: lyrics, settings: settings, placement: lyricsPlacement))
+        view.sizingOptions = []
+        lyricsPanel.contentView = view
+
+        // Suit la pilule quand elle bouge, et s'affiche au-dessus ou en dessous selon la place.
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) { [weak self] _ in
+            self?.placeLyrics()
+        }
+        // Glissement à deux doigts sur les paroles : consultation des lignes précédentes.
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel, handler: { [weak self] e in
+            if let self, e.window === self.lyricsPanel { self.lyrics.userScrolled() }
+            return e
+        }) { mouseMonitors.append(m) }
+
+        lyrics.$enabled.combineLatest(ui.$shown, music.$track.map { $0 != nil })
+            .removeDuplicates { $0 == $1 }
+            .sink { [weak self] enabled, shown, hasTrack in
+                DispatchQueue.main.async { self?.setLyricsVisible(enabled && shown && hasTrack) }
+            }
+            .store(in: &cancellables)
+        settings.$size.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.placeLyrics() } }
+            .store(in: &cancellables)
+    }
+
+    private func placeLyrics() {
+        guard let lyricsPanel, let screen = panel.screen ?? NSScreen.main else { return }
+        let size = lyricsSize
+        let m = LyricsPanel.margin
+        let pillTop = panel.frame.maxY - PillPanel.marginY
+        let pillBottom = panel.frame.minY + PillPanel.marginY
+        // Collé au bord de la pilule (les paroles en sortent) : au-dessus si la place le permet,
+        // sinon en dessous (pilule en haut de l'écran).
+        let gap: CGFloat = 4
+        let below = pillTop + gap + size.height - m > screen.visibleFrame.maxY
+        let y = below ? pillBottom - gap - size.height : pillTop + gap
+        if lyricsPlacement.below != below { lyricsPlacement.below = below }
+        lyricsPanel.setFrame(NSRect(x: panel.frame.midX - size.width / 2, y: y, width: size.width, height: size.height),
+                             display: false)
+    }
+
+    private func setLyricsVisible(_ visible: Bool) {
+        if visible {
+            placeLyrics()
+            if !lyricsPanel.isVisible { lyricsPanel.orderFrontRegardless() }
+            DispatchQueue.main.async {
+                self.lyricsPlacement.shown = true
+            }
+        } else {
+            lyricsPlacement.shown = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if !self.lyricsPlacement.shown { self.lyricsPanel.orderOut(nil) }
             }
         }
     }

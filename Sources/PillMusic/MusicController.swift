@@ -31,7 +31,9 @@ final class MusicController: ObservableObject {
     /// Début d'un « stop » : entre deux morceaux, Musique s'arrête brièvement. On garde l'affichage.
     private var stoppedSince: Date?
     private var pendingUntil = Date.distantPast
-    private var positionDate = Date()
+    private var positionDate = Date() { didSet { positionChanged.send() } }
+    /// Émis quand la position de lecture est recalée (seek, pause, dérive) : les paroles se resynchronisent.
+    let positionChanged = PassthroughSubject<Void, Never>()
 
     private let queue = DispatchQueue(label: "pillmusic.applescript", qos: .userInitiated)
     private var scripts: [String: NSAppleScript] = [:] // utilisé uniquement sur `queue`
