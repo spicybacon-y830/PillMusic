@@ -295,18 +295,18 @@ struct LyricsView: View {
     /// Passage instrumental : une note centrée sur la hauteur d'une ligne.
     private func note(k: CGFloat) -> some View {
         Image(systemName: "music.note")
-            .font(.system(size: 13 * k, weight: .semibold))
+            .font(.system(size: 12 * k, weight: .semibold))
             .foregroundStyle(Color.white)
-            .frame(height: 19 * k)
+            .frame(height: 17 * k)
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private func line(_ text: String, k: CGFloat) -> some View {
         Text(text)
-            .font(Design.font(15 * k))
+            .font(Design.font(13.5 * k))
             .foregroundStyle(Color.white)
             .multilineTextAlignment(.trailing)
-            .lineLimit(2)
+            .lineLimit(3)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
