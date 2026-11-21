@@ -427,7 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let k = settings.scale / 0.25
         // Même largeur que la pilule fermée, bord droit aligné sur le bouton play.
         return CGSize(width: (Design.width - 2 * Design.paddingH) * settings.scale + LyricsPanel.margin * 2,
-                      height: 104 * k + LyricsPanel.margin)
+                      height: 50 * k + LyricsPanel.margin)
     }
 
     private func setupLyrics() {

@@ -306,7 +306,8 @@ struct LyricsView: View {
             .font(Design.font(13.5 * k))
             .foregroundStyle(Color.white)
             .multilineTextAlignment(.trailing)
-            .lineLimit(3)
+            .lineLimit(2)
+            .minimumScaleFactor(0.8)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
