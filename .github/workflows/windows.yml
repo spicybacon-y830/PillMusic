@@ -1,0 +1,49 @@
+name: Windows
+
+on:
+  push:
+    branches: [main, windows]
+    paths: ["windows/**", ".github/workflows/windows.yml"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publier (x64 et ARM64)
+        shell: pwsh
+        run: |
+          foreach ($rid in "win-x64", "win-arm64") {
+            dotnet publish windows/PillMusic/PillMusic.csproj -c Release -r $rid -o "out/$rid"
+            Compress-Archive -Path "out/$rid/PillMusic.exe" -DestinationPath "PillMusic-Windows-$($rid.Substring(4)).zip" -Force
+          }
+
+      - name: Rendu de vérification
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "out/win-x64/PillMusic.exe" -ArgumentList "--render", "$PWD/render.png" -PassThru -Wait
+          if (!(Test-Path render.png)) { throw "rendu absent (code $($p.ExitCode))" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PillMusic-Windows
+          path: |
+            PillMusic-Windows-*.zip
+            render.png
+
+      - name: Joindre à la Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload "${{ github.ref_name }}" PillMusic-Windows-x64.zip PillMusic-Windows-arm64.zip --clobber
