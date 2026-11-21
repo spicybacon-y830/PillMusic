@@ -319,6 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }.store(in: &cancellables)
 
         layoutWindow(keepCenter: restoredCenter())
+        saveCenter()
         settings.$size.dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -352,6 +353,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌃⌘M : afficher / masquer la pilule depuis n'importe quelle app.
         hotKey = GlobalHotKey(character: "m", modifiers: UInt32(controlKey | cmdKey)) { [weak self] in self?.togglePill() }
         setupStatusItem()
+
+        // Écran débranché, résolution changée, réveil : si la pilule se retrouve hors des écrans,
+        // on la ramène à sa place par défaut.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [weak self] _ in self?.rescueIfOffscreen() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidWakeNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in self?.rescueIfOffscreen() }
 
         // Première ouverture depuis Applications : active l'ouverture au démarrage (désactivable au clic droit).
         let d = UserDefaults.standard
@@ -520,6 +528,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let vf = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
         return CGPoint(x: vf.midX, y: vf.maxY - Design.height * settings.size.scale / 2 - 16)
+    }
+
+    private func rescueIfOffscreen() {
+        let c = CGPoint(x: panel.frame.midX, y: panel.frame.midY)
+        if NSScreen.screens.contains(where: { $0.frame.contains(c) }) {
+            ui.keepOnScreen()
+        } else {
+            layoutWindow(keepCenter: restoredCenter())
+        }
+        saveCenter()
+        placeLyrics()
     }
 
     private func saveCenter() {
