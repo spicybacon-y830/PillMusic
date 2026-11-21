@@ -741,7 +741,7 @@ sealed class PillView : FrameworkElement
             {
                 var grad = new LinearGradientBrush(Design.Hex(0xD9D9DE), Design.Hex(0x9C9CA6), new Point(0, 0), new Point(1, 1));
                 dc.DrawEllipse(grad, null, new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2), rect.Width / 2, rect.Height / 2);
-                var note = Design.Text("", d * 0.32 * scale, Design.WithAlpha(Colors.White, 0.9), dpi, symbol: true);
+                var note = Design.Glyph("\u266A", d * 0.42 * scale, Design.WithAlpha(Colors.White, 0.9), dpi);
                 dc.DrawText(note, new Point(rect.X + (rect.Width - note.Width) / 2, rect.Y + (rect.Height - note.Height) / 2));
             }
             dc.Pop();
@@ -868,9 +868,15 @@ sealed class PillView : FrameworkElement
             {
                 double act = lyricsActive.Value;
                 if (act > 0.001) dc.DrawEllipse(new SolidColorBrush(Design.WithAlpha(c.Title, 0.14 * act)), null, center, rad, rad);
-                var (shape, outline) = Glyphs.QuoteBubble(center, size * 0.46 * 1.15, lyrics.Enabled);
-                if (outline != null) dc.DrawGeometry(null, new Pen(fill, size * 0.46 * 0.11), outline);
-                dc.DrawGeometry(fill, null, shape);
+                // Bulle (pleine quand les paroles sont actives) et guillemets.
+                double bw = size * 0.46 * 1.12;
+                var bubble = Glyphs.Bubble(center, bw);
+                if (lyrics.Enabled) dc.DrawGeometry(fill, null, bubble);
+                else dc.DrawGeometry(null, new Pen(fill, bw * 0.1) { LineJoin = PenLineJoin.Round }, bubble);
+                var quoteColor = lyrics.Enabled ? (settings.IsDark ? Design.Hex(0x4A4A4A) : Design.Hex(0xDCDCDC)) : c.Title;
+                var q = Design.Glyph("\u201C", bw * 0.95, quoteColor, dpi);
+                double qTop = center.Y - bw * 0.39 + bw * 0.78 * 0.84 / 2 - q.Height * 0.36;
+                dc.DrawText(q, new Point(center.X - q.WidthIncludingTrailingWhitespace / 2, qTop));
             }
             else
             {

@@ -297,7 +297,7 @@ static class RenderTest
                 var lyrics = new LyricsModel(media, settings);
                 var win = new PillWindow(settings, media, metal, lyrics);
                 var view = win.View;
-                ((System.Windows.Controls.Canvas)win.Content).Background = new SolidColorBrush(Color.FromRgb(204, 204, 204));
+                if (!lyricsOn) ((System.Windows.Controls.Canvas)win.Content).Background = new SolidColorBrush(Color.FromRgb(204, 204, 204));
                 view.RenderDemo(expanded);
                 metal.Pixels = (int)(Design.Disc * settings.Scale * 3);
                 metal.SetPalette(media.Palette);
@@ -326,8 +326,8 @@ static class RenderTest
                 using (var dc = combo.RenderOpen())
                 {
                     dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(204, 204, 204)), null, new Rect(0, 0, rtb.PixelWidth, rtb.PixelHeight + lrtb.PixelHeight));
-                    dc.DrawImage(lrtb, new Rect((rtb.PixelWidth - lrtb.PixelWidth) / 2.0, 0, lrtb.PixelWidth, lrtb.PixelHeight));
                     dc.DrawImage(rtb, new Rect(0, lrtb.PixelHeight - (Design.MarginY - 4) * 3, rtb.PixelWidth, rtb.PixelHeight));
+                    dc.DrawImage(lrtb, new Rect((rtb.PixelWidth - lrtb.PixelWidth) / 2.0, 0, lrtb.PixelWidth, lrtb.PixelHeight));
                 }
                 var both = new RenderTargetBitmap(rtb.PixelWidth, rtb.PixelHeight + lrtb.PixelHeight, 96, 96, PixelFormats.Pbgra32);
                 both.Render(combo);

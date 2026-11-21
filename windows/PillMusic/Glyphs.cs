@@ -70,6 +70,23 @@ static class Glyphs
         return g;
     }
 
+    /// Bulle de dialogue arrondie avec une petite queue en bas à gauche, centrée sur `c`, largeur `w`.
+    public static Geometry Bubble(Point c, double w)
+    {
+        double h = w * 0.78;
+        var body = new Rect(c.X - w / 2, c.Y - h / 2, w, h * 0.84);
+        var rect = new RectangleGeometry(body, h * 0.32, h * 0.32);
+        var tail = RoundedPolygon(new[]
+        {
+            new Point(body.Left + w * 0.18, body.Bottom - h * 0.12),
+            new Point(body.Left + w * 0.44, body.Bottom - h * 0.12),
+            new Point(body.Left + w * 0.12, body.Bottom + h * 0.2),
+        }, w * 0.03);
+        var g = new CombinedGeometry(GeometryCombineMode.Union, rect, tail);
+        g.Freeze();
+        return g;
+    }
+
     /// Bulle de citation (quote.bubble), pleine ou en contour, centrée sur `c`, largeur `w`.
     public static (Geometry shape, Geometry? stroke) QuoteBubble(Point c, double w, bool filled)
     {
