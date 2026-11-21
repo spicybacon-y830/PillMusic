@@ -13,13 +13,29 @@ struct Track: Equatable {
     var duration: Double
 }
 
-/// Pilote l'app Musique via AppleScript (API officielle et stable de macOS).
+/// Lecteur piloté : l'app Musique d'Apple ou Spotify (tous deux scriptables en AppleScript).
+enum Player: String, CaseIterable {
+    case music, spotify
+
+    var bundleID: String { self == .music ? "com.apple.Music" : "com.spotify.client" }
+    var appName: String { self == .music ? "Music" : "Spotify" }
+    var label: String { self == .music ? "Musique" : "Spotify" }
+    var notification: String { self == .music ? "com.apple.Music.playerInfo" : "com.spotify.client.PlaybackStateChanged" }
+    var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty }
+    var isInstalled: Bool { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil }
+}
+
+/// Pilote Musique ou Spotify via AppleScript (API officielle et stable de macOS).
+/// Le lecteur actif suit celui qui joue : lancer un morceau dans l'un ou l'autre suffit.
 final class MusicController: ObservableObject {
-    static let bundleID = "com.apple.Music"
     static let defaultTint = NSColor(srgbRed: 0xCA / 255, green: 0x05 / 255, blue: 0x03 / 255, alpha: 1)
     static let defaultDisc = NSColor(srgbRed: 0xC1 / 255, green: 0x1F / 255, blue: 0x42 / 255, alpha: 1)
 
     @Published private(set) var state: PlayerState = .notRunning
+    /// Lecteur actif (mémorisé : c'est lui que le bouton play lance quand tout est fermé).
+    @Published private(set) var player: Player = Player(rawValue: UserDefaults.standard.string(forKey: "player") ?? "") ?? .music {
+        didSet { UserDefaults.standard.set(player.rawValue, forKey: "player") }
+    }
     @Published private(set) var track: Track?
     @Published private(set) var artwork: NSImage?
     @Published private(set) var palette: Palette.Colors = .fallback
@@ -41,14 +57,17 @@ final class MusicController: ObservableObject {
     private var refreshInFlight = false
     private var artworkTrackID: String?
     private var artworkCache: [String: (NSImage?, Palette.Colors)] = [:]
+    /// Spotify donne l'adresse de la pochette avec l'état du morceau.
+    private var artworkURLs: [String: URL] = [:]
 
     // MARK: - Cycle de vie
 
     func start() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(playerInfoChanged),
-            name: NSNotification.Name("com.apple.Music.playerInfo"), object: nil
-        )
+        for p in Player.allCases {
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(playerInfoChanged(_:)), name: NSNotification.Name(p.notification), object: nil
+            )
+        }
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(self, selector: #selector(appsChanged(_:)), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
         ws.addObserver(self, selector: #selector(appsChanged(_:)), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
@@ -78,16 +97,36 @@ final class MusicController: ObservableObject {
         timer?.tolerance = interval * 0.25
     }
 
-    @objc private func playerInfoChanged() { refresh() }
+    @objc private func playerInfoChanged(_ note: Notification) {
+        // Le lecteur qui se met à jouer devient le lecteur actif.
+        if let source = Player.allCases.first(where: { $0.notification == note.name.rawValue }), source != player,
+           (note.userInfo?["Player State"] as? String) == "Playing" {
+            switchTo(source)
+        }
+        refresh()
+    }
 
     @objc private func appsChanged(_ note: Notification) {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier == Self.bundleID else { return }
+              Player.allCases.contains(where: { $0.bundleID == app.bundleIdentifier }) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.refresh() }
     }
 
-    var isMusicRunning: Bool {
-        !NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleID).isEmpty
+    var isMusicRunning: Bool { player.isRunning }
+
+    /// Choix manuel du lecteur (menu) : utile quand les deux sont ouverts.
+    func choose(_ p: Player) {
+        guard p != player else { return }
+        switchTo(p)
+        refresh()
+    }
+
+    private func switchTo(_ p: Player) {
+        player = p
+        pendingState = nil
+        stoppedSince = nil
+        track = nil
+        setArtwork(nil, colors: .fallback, for: nil)
     }
 
     /// Position actuelle, interpolée entre deux lectures pour une barre fluide.
@@ -122,17 +161,17 @@ final class MusicController: ObservableObject {
         }
         pendingState = state
         pendingUntil = Date().addingTimeInterval(2)
-        run("tell application \"Music\" to playpause") { _ in self.refreshSoon() }
+        run("tell application \"\(player.appName)\" to playpause") { _ in self.refreshSoon() }
     }
 
     func next() {
         guard isMusicRunning else { return }
-        run("tell application \"Music\" to next track") { _ in self.refreshSoon() }
+        run("tell application \"\(player.appName)\" to next track") { _ in self.refreshSoon() }
     }
 
     func previous() {
         guard isMusicRunning else { return }
-        run("tell application \"Music\" to previous track") { _ in self.refreshSoon() }
+        run("tell application \"\(player.appName)\" to previous track") { _ in self.refreshSoon() }
     }
 
     func seek(to seconds: Double) {
@@ -140,21 +179,22 @@ final class MusicController: ObservableObject {
         positionBase = seconds; positionDate = Date()
         objectWillChange.send()
         let value = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), seconds)
-        run("tell application \"Music\" to set player position to \(value)") { _ in self.refreshSoon() }
+        run("tell application \"\(player.appName)\" to set player position to \(value)") { _ in self.refreshSoon() }
     }
 
     func openMusic() {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID) else { return }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: player.bundleID) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
 
     private func launchMusicAndPlay() {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID) else { return }
+        let p = player
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: p.bundleID) else { return }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
         NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
             self.queue.asyncAfter(deadline: .now() + 1.2) {
-                _ = self.execute("tell application \"Music\" to play")
+                _ = self.execute("tell application \"\(p.appName)\" to play")
                 DispatchQueue.main.async { self.refreshSoon() }
             }
         }
@@ -165,6 +205,19 @@ final class MusicController: ObservableObject {
     }
 
     // MARK: - Lecture de l'état
+
+    private static let spotifyStateScript = """
+    tell application "Spotify"
+        set ps to player state as text
+        if ps is "stopped" then return {"stopped"}
+        try
+            set t to current track
+            return {ps, name of t, artist of t, album of t, (duration of t) / 1000, player position, id of t, artwork url of t}
+        on error
+            return {ps}
+        end try
+    end tell
+    """
 
     private static let stateScript = """
     tell application "Music"
@@ -184,6 +237,10 @@ final class MusicController: ObservableObject {
     """
 
     func refresh() {
+        // Lecteur actif fermé mais l'autre ouvert : on bascule dessus.
+        if !player.isRunning, let other = Player.allCases.first(where: { $0 != player && $0.isRunning }) {
+            switchTo(other)
+        }
         guard isMusicRunning else {
             if state != .notRunning || track != nil {
                 state = .notRunning
@@ -194,8 +251,10 @@ final class MusicController: ObservableObject {
         }
         guard !refreshInFlight else { return }
         refreshInFlight = true
-        run(Self.stateScript) { result in
+        let p = player
+        run(p == .music ? Self.stateScript : Self.spotifyStateScript) { result in
             self.refreshInFlight = false
+            guard p == self.player else { return self.refreshSoon() } // lecteur changé entre-temps
             self.apply(result)
         }
     }
@@ -253,6 +312,7 @@ final class MusicController: ObservableObject {
         let position = desc.atIndex(6)?.doubleValue ?? 0
         var id = desc.atIndex(7)?.stringValue ?? ""
         if id.isEmpty { id = "\(title)|\(artist)|\(album)" }
+        if let art = desc.atIndex(8)?.stringValue, let url = URL(string: art) { artworkURLs[id] = url }
 
         let newTrack = Track(id: id, title: title, artist: artist, album: album, duration: duration)
         let trackChanged = newTrack.id != track?.id
@@ -290,6 +350,18 @@ final class MusicController: ObservableObject {
         artworkTrackID = track.id
         if let cached = artworkCache[track.id] {
             setArtwork(cached.0, colors: cached.1, for: track.id)
+            return
+        }
+        if player == .spotify {
+            let fetch: (URL) -> Void = { url in
+                URLSession.shared.dataTask(with: url) { data, _, _ in
+                    let image = data.flatMap { NSImage(data: $0) }
+                    if let image { self.queue.async { self.finishArtwork(image, for: track) } }
+                    else { ArtworkSearch.find(track: track) { found in self.queue.async { self.finishArtwork(found, for: track) } } }
+                }.resume()
+            }
+            if let url = artworkURLs[track.id] { fetch(url) }
+            else { ArtworkSearch.find(track: track) { found in self.queue.async { self.finishArtwork(found, for: track) } } }
             return
         }
         queue.async {

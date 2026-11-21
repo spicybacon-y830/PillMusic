@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>PillMusic contrôle l'app Musique pour lancer, mettre en pause et changer de morceau.</string>
+    <string>PillMusic contrôle Musique ou Spotify pour lancer, mettre en pause et changer de morceau.</string>
 </dict>
 </plist>
 PLIST

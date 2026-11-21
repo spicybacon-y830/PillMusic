@@ -156,6 +156,10 @@ enum TrackLink {
 
     static func find(track: Track, completion: @escaping (URL?) -> Void) {
         if let cached = cache[track.id] { return completion(cached) }
+        // Morceau Spotify : le lien se déduit directement de son identifiant.
+        if track.id.hasPrefix("spotify:track:") {
+            return completion(URL(string: "https://open.spotify.com/track/" + track.id.dropFirst("spotify:track:".count)))
+        }
         let local = (Locale.current.region?.identifier ?? "US").uppercased()
         lookup(track: track, songOnly: true) { result in
             guard let link = (result?["trackViewUrl"] as? String).flatMap(URL.init(string:)),

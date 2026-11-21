@@ -603,10 +603,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(ActionItem("Ouvrir Musique") { [weak self] in self?.music.openMusic() })
+        menu.addItem(ActionItem("Ouvrir \(music.player.label)") { [weak self] in self?.music.openMusic() })
         menu.addItem(ActionItem("Morceau suivant") { [weak self] in self?.ui.skipDirection = 1; self?.music.next() })
         menu.addItem(ActionItem("Morceau précédent") { [weak self] in self?.ui.skipDirection = -1; self?.music.previous() })
         menu.addItem(.separator())
+
+        let playerMenu = NSMenu()
+        for p in Player.allCases where p.isInstalled {
+            let item = ActionItem(p.label) { [weak self] in self?.music.choose(p) }
+            item.state = music.player == p ? .on : .off
+            playerMenu.addItem(item)
+        }
+        if playerMenu.items.count > 1 {
+            let playerItem = NSMenuItem(title: "Lecteur", action: nil, keyEquivalent: "")
+            playerItem.submenu = playerMenu
+            menu.addItem(playerItem)
+        }
 
         let sizeMenu = NSMenu()
         for size in PillSize.allCases {

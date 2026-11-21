@@ -211,9 +211,9 @@ struct InfoColumn: View {
 
     private var texts: (String, String) {
         switch music.state {
-        case .permissionDenied: return ("Accès à Musique refusé", "Réglages › Confidentialité › Automatisation")
-        case .notRunning: return ("Musique est fermée", "Clique sur play pour lancer")
-        case .stopped: return ("Rien en lecture", "Lance un morceau dans Musique")
+        case .permissionDenied: return ("Accès à \(music.player.label) refusé", "Réglages › Confidentialité › Automatisation")
+        case .notRunning: return ("\(music.player.label) est fermé", "Clique sur play pour lancer")
+        case .stopped: return ("Rien en lecture", "Lance un morceau dans \(music.player.label)")
         default: return (music.track?.title ?? "—", music.track?.artist ?? "")
         }
     }
