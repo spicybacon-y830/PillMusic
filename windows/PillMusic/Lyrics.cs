@@ -457,7 +457,7 @@ sealed class LyricsView : FrameworkElement
             if (ft != null) dc.DrawText(ft, new Point(area.Left, top));
             else
             {
-                var note = Design.Glyph("\u266A", 15 * k(), Colors.White, dpi);
+                var note = Design.Glyph("\u266A", Design.NoteFont, 15 * k(), Colors.White, dpi);
                 dc.DrawText(note, new Point(area.Right - note.Width, top + (h - note.Height) / 2));
             }
             dc.Pop();
