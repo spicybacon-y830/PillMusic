@@ -42,6 +42,16 @@ static class Design
     public static readonly Typeface Symbols = new(new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol"),
         FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
 
+    /// Note de musique pleine (♪) et guillemets.
+    public static readonly Typeface NoteFont = new(new FontFamily("Segoe UI Symbol, Segoe UI"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+    public static readonly Typeface QuoteFont = new(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.Black, FontStretches.Normal);
+
+    public static FormattedText Glyph(string s, Typeface face, double size, Color color, double dpi)
+    {
+        var brush = new SolidColorBrush(color); brush.Freeze();
+        return new FormattedText(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, face, size, brush, dpi);
+    }
+
     static readonly Dictionary<(string, double, uint, bool), FormattedText> textCache = new();
 
     /// Texte mis en cache (évite de reformater à chaque image d'animation).
